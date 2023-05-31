@@ -1,5 +1,5 @@
 import requests
-from model import OffSamplePredictModel
+from lithops.serverless.backends.aws_lambda_custom.custom_code.model import OffSamplePredictModel
 
 class PredictResource:
     def __init__(self, model_path, batch_size=32):

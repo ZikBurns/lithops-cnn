@@ -47,7 +47,6 @@ from lithops.storage.utils import create_job_key, CloudObject
 from lithops.monitor import JobMonitor
 from lithops.utils import FuturesList
 from lithops.cnn_function import my_function
-
 logger = logging.getLogger(__name__)
 CLEANER_PROCESS = None
 

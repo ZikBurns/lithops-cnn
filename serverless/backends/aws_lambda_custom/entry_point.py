@@ -16,13 +16,6 @@
 
 import os
 import logging
-from lithops.version import __version__
-from lithops.utils import setup_lithops_logger
-from lithops.worker import function_handler
-from lithops.worker import function_invoker
-from lithops.worker.utils import get_runtime_metadata
-
-logger = logging.getLogger('lithops.worker')
 import sys
 import PIL
 import zipfile
@@ -42,8 +35,17 @@ def import_torch():
         os.rename(tempdir, torch_dir)
 
 
+import_torch()
+from lithops.version import __version__
+from lithops.utils import setup_lithops_logger
+from lithops.worker import function_handler
+from lithops.worker import function_invoker
+from lithops.worker.utils import get_runtime_metadata
+
+logger = logging.getLogger('lithops.worker')
+
+
 def lambda_handler(event, context):
-    import_torch()
     os.environ['__LITHOPS_ACTIVATION_ID'] = context.aws_request_id
     os.environ['__LITHOPS_BACKEND'] = 'AWS Lambda'
 

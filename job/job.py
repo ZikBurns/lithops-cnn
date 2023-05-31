@@ -32,7 +32,7 @@ from lithops.job.serialize import SerializeIndependent, create_module_data
 from lithops.constants import MAX_AGG_DATA_SIZE, LOCALHOST,\
     SERVERLESS, STANDALONE, CUSTOM_RUNTIME_DIR, FAAS_BACKENDS
 from lithops.storage import InternalStorage
-
+from lithops.serverless.backends.aws_lambda_custom.custom_code.function import lambda_function
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,7 @@ def create_map_job_cnn(
     include_modules,
     exclude_modules,
     execution_timeout,
+    map_function=lambda_function,
     chunksize=None,
     extra_args=None,
     obj_chunk_size=None,
@@ -123,10 +124,7 @@ def create_map_job_cnn(
     Wrapper to create a map job. It integrates COS logic to process objects.
     """
     host_job_meta = {'host_job_create_tstamp': time.time()}
-
-    def sample_function():
-        print("Hello from a sample function")
-    map_iterdata = utils.verify_args(sample_function, iterdata, extra_args)
+    map_iterdata = utils.verify_args(map_function, iterdata, extra_args)
 
     # Object processing functionality
     ppo = None
@@ -147,6 +145,7 @@ def create_map_job_cnn(
         internal_storage=internal_storage,
         executor_id=executor_id,
         job_id=job_id,
+        func=lambda_function,
         iterdata=map_iterdata,
         chunksize=chunksize,
         runtime_meta=runtime_meta,
@@ -358,6 +357,7 @@ def _create_job(
         _store_func_and_modules(job.local_tmp_dir, job.func_key, func_str, module_data)
         host_job_meta['host_func_upload_time'] = 0
 
+
     # upload data
     if upload_data:
         # Upload iterdata to COS only if a single element is greater than 8KB
@@ -394,6 +394,7 @@ def _create_job_cnn(
     internal_storage,
     executor_id,
     job_id,
+    func,
     iterdata,
     runtime_meta,
     runtime_memory,
@@ -424,6 +425,7 @@ def _create_job_cnn(
     job.executor_id = executor_id
     job.job_id = job_id
     job.job_key = create_job_key(job.executor_id, job.job_id)
+    job.function_name = "custom_function"
     job.extra_env = ext_env
     job.total_calls = len(iterdata)
 
@@ -461,6 +463,19 @@ def _create_job_cnn(
     if include_modules is None:
         inc_modules = None
 
+    logger.debug('ExecutorID {} | JobID {} - Serializing function and data'.format(executor_id, job_id))
+    job_serialize_start = time.time()
+    serializer = SerializeIndependent(runtime_meta['preinstalls'])
+    func_and_data_ser, mod_paths = serializer([func] + iterdata, inc_modules, exc_modules)
+    data_strs = func_and_data_ser[1:]
+    data_size_bytes = sum(len(x) for x in data_strs)
+    module_data = create_module_data(mod_paths)
+    func_str = func_and_data_ser[0]
+
+    func_module_str = pickle.dumps({'func': func_str, 'module_data': module_data}, -1)
+    func_module_size_bytes = len(func_module_str)
+
+
     host_job_meta['host_job_serialize_time'] = 0
     host_job_meta['func_data_size_bytes'] = 0
     host_job_meta['func_module_size_bytes'] = 0
@@ -474,6 +489,10 @@ def _create_job_cnn(
         log_msg = ('ExecutorID {} | JobID {} - Total data exceeded maximum size '
                    'of {}'.format(executor_id, job_id, utils.sizeof_fmt(data_limit * 1024**2)))
         raise Exception(log_msg)
+
+    function_hash = hashlib.md5(func_module_str).hexdigest()
+    job.func_key = create_func_key(executor_id, function_hash)
+    upload_data = not (len(str(data_strs[0])) * job.chunksize < 8 * 1204 and backend in FAAS_BACKENDS)
 
     # upload data
     if upload_data:

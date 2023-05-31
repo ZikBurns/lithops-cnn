@@ -3,7 +3,7 @@ import io
 
 import numpy
 from torch import Tensor
-from transformations import apply_tfms,normalize_batch
+from lithops.serverless.backends.aws_lambda_custom.custom_code.transformations import apply_tfms,normalize_batch
 from torchvision import transforms
 from PIL import Image
 import torch
