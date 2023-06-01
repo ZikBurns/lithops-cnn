@@ -6,6 +6,7 @@ import boto3
 import sys
 import shutil
 import glob
+from botocore.errorfactory import ClientError
 
 TEMP_PATH = '/tmp'
 LAYER_DIR_PATH = os.path.join(TEMP_PATH, 'modules', 'python')
@@ -20,8 +21,7 @@ def add_directory_to_zip(zip_file, full_dir_path, sub_dir=''):
         elif os.path.isdir(full_path) and '__pycache__' not in full_path:
             add_directory_to_zip(zip_file, full_path, os.path.join(sub_dir, file))
 
-
-def lambda_handler(event, context):
+def install_dependencies(event):
     if os.path.exists(LAYER_DIR_PATH):
         if os.path.isdir(LAYER_DIR_PATH):
             shutil.rmtree(LAYER_DIR_PATH)
@@ -112,18 +112,33 @@ def lambda_handler(event, context):
         shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH,'torch')
         shutil.rmtree(torch_path)
 
-    client = boto3.client('s3')
-    client.download_file(event['bucket'], "torchscript_model.pt",
-                         os.path.join(TEMP_PATH, 'modules') + '/torchscript_model.pt')
+def lambda_handler(event, context):
 
-    with zipfile.ZipFile(LAYER_ZIP_PATH, 'w') as layer_zip:
-        add_directory_to_zip(layer_zip, os.path.join(TEMP_PATH, 'modules'))
 
-    print("Everything added to Zip")
-    with open(LAYER_ZIP_PATH, 'rb') as layer_zip:
-        client.put_object(Body=layer_zip, Bucket=event['bucket'], Key=event['key'])
+    s3 = boto3.client('s3')
+    try:
+        s3.head_object(Bucket=event['bucket'], Key=event['key'])
+    except ClientError as e:
+        if e.response['Error']['Code'] == "404":
+            # The key does not exist.
+            install_dependencies(event)
+            s3.download_file(event['bucket'], "torchscript_model.pt",
+                                 os.path.join(TEMP_PATH, 'modules') + '/torchscript_model.pt')
 
-    print("layer in S3")
+            with zipfile.ZipFile(LAYER_ZIP_PATH, 'w') as layer_zip:
+                add_directory_to_zip(layer_zip, os.path.join(TEMP_PATH, 'modules'))
+
+            print("Everything added to Zip")
+            with open(LAYER_ZIP_PATH, 'rb') as layer_zip:
+                s3.put_object(Body=layer_zip, Bucket=event['bucket'], Key=event['key'])
+
+            print("layer in S3")
+        else:
+            # Something else has gone wrong.
+            return {
+                'statusCode': e.response['Error']['Code'],
+                'body': json.dumps(event)
+            }
     return {
         'statusCode': 200,
         'body': json.dumps(event)
