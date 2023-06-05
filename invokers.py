@@ -267,6 +267,20 @@ class BatchInvoker(Invoker):
         self.job_monitor.start(futures)
 
         return futures
+    def run_job_cnn(self, job):
+        """
+        Run a job
+        """
+        # Ensure only self.max_workers are started
+        total_workers = job.total_calls // job.chunksize + (job.total_calls % job.chunksize > 0)
+        if self.max_workers < total_workers:
+            job.chunksize = job.total_calls // self.max_workers + (job.total_calls % self.max_workers > 0)
+
+        # Perform the invocation
+        futures = self._run_job(job)
+        self.job_monitor.start(futures)
+
+        return futures
 
 
 class FaaSInvoker(Invoker):
