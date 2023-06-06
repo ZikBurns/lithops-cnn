@@ -84,7 +84,7 @@ CLEANER_PID_FILE = os.path.join(CLEANER_DIR, 'cleaner.pid')
 CLEANER_LOG_FILE = os.path.join(CLEANER_DIR, 'cleaner.log')
 
 HOME_DIR = os.path.expanduser('~')
-CONFIG_DIR = os.path.join(HOME_DIR, '.lithops')
+CONFIG_DIR = os.path.join('/tmp/home', '.lithops')
 CACHE_DIR = os.path.join(CONFIG_DIR, 'cache')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config')
 CONFIG_FILE_GLOBAL = os.path.join("/etc", "lithops", "config")

@@ -40,8 +40,8 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-LITHOPS_FUNCTION_ZIP = 'lithops_lambda.zip'
-BUILD_LAYER_FUNCTION_ZIP = 'build_layer.zip'
+LITHOPS_FUNCTION_ZIP = '/tmp/lithops_lambda.zip'
+BUILD_LAYER_FUNCTION_ZIP = '/tmp/build_layer.zip'
 
 
 class AWSLambdaBackend:
@@ -182,6 +182,9 @@ class AWSLambdaBackend:
         @return: layer ARN for the specified runtime or None if it is not deployed
         """
         layers = self._list_layers()
+        if "custom" in runtime_name and len(layers)==1:
+            _, layer_arn = layers[0]
+            return layer_arn
         dep_layer = [layer for layer in layers if layer[0] == self._format_layer_name(runtime_name)]
         if len(dep_layer) == 1:
             _, layer_arn = dep_layer.pop()
@@ -325,6 +328,8 @@ class AWSLambdaBackend:
         for layer in layers:
             if 'lithops' in layer['LayerName'] and self.user_key in layer['LayerName']:
                 lithops_layers.append((layer['LayerName'], layer['LatestMatchingVersion']['LayerVersionArn']))
+            if layer['LayerName']=='LayerLithopsTorch':
+                lithops_layers.append((layer['LayerName'], layer['LatestMatchingVersion']['LayerVersionArn']))
         return lithops_layers
 
     def _delete_function(self, function_name):
@@ -409,15 +414,20 @@ class AWSLambdaBackend:
         """
         logger.info(f"Deploying runtime: {runtime_name} - Memory: {memory} - Timeout: {timeout}")
         function_name = self._format_function_name(runtime_name, memory)
-
+        # if "custom" in runtime_name:
+        #     layer_arn = self._get_layer("")
         layer_arn = self._get_layer(runtime_name)
         if not layer_arn:
+            start = time.time()
             layer_arn = self._create_layer(runtime_name)
+            end = time.time()
+            logger.info(f"Layer Creation time: ", end - start)
 
         code = self._create_handler_bin()
         env_vars = {t['name']: t['value'] for t in self.lambda_config['env_vars']}
 
         try:
+            start=time.time()
             response = self.lambda_client.create_function(
                 FunctionName=function_name,
                 Runtime=config.AVAILABLE_PY_RUNTIMES[utils.CURRENT_PY_VERSION],
@@ -461,6 +471,8 @@ class AWSLambdaBackend:
                 raise e
 
         self._wait_for_function_deployed(function_name)
+        end = time.time()
+        print("Function deployment time: ",end-start)
         logger.debug('OK --> Created lambda function {}'.format(function_name))
 
     def _deploy_container_runtime(self, runtime_name, memory, timeout):
@@ -545,12 +557,14 @@ class AWSLambdaBackend:
         @param timeout: runtime timeout in seconds
         @return: runtime metadata
         """
-        if runtime_name == self._get_default_runtime_name():
-            self._deploy_default_runtime(runtime_name, memory, timeout)
+        if "custom" in runtime_name:
+            runtime_meta = self._generate_runtime_meta(runtime_name, memory)
         else:
-            self._deploy_container_runtime(runtime_name, memory, timeout)
-
-        runtime_meta = self._generate_runtime_meta(runtime_name, memory)
+            if runtime_name == self._get_default_runtime_name():
+                self._deploy_default_runtime(runtime_name, memory, timeout)
+            else:
+                self._deploy_container_runtime(runtime_name, memory, timeout)
+            runtime_meta = self._generate_runtime_meta(runtime_name, memory)
 
         return runtime_meta
 
@@ -644,8 +658,10 @@ class AWSLambdaBackend:
         @param payload: invoke dict payload
         @return: invocation ID
         """
-
-        function_name = self._format_function_name(runtime_name, runtime_memory)
+        if "custom" in runtime_name:
+            function_name="lithops-custom-runtime"
+        else:
+            function_name = self._format_function_name(runtime_name, runtime_memory)
 
         headers = {'Host': self.host, 'X-Amz-Invocation-Type': 'Event', 'User-Agent': self.user_agent}
         url = f'https://{self.host}/2015-03-31/functions/{function_name}/invocations'

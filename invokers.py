@@ -106,10 +106,12 @@ class Invoker:
                .format(self.executor_id, job_id, self.runtime_name))
         msg = msg + f'- {runtime_memory}MB' if runtime_memory else msg
         logger.info(msg)
-        #TODO: change runtime name
         runtime_key = self.compute_handler.get_runtime_key(self.runtime_name, runtime_memory, __version__)
+        if "custom" in self.runtime_name:
+            noruntimekey = runtime_key.rsplit('/', 1)[0] + '/'
+            runtime_key = noruntimekey+'lithops-custom-runtime'
         runtime_meta = self.internal_storage.get_runtime_meta(runtime_key)
-
+        start=time.time()
         if not runtime_meta:
             msg = f'Runtime {self.runtime_name}'
             msg = msg + f' with {runtime_memory}MB' if runtime_memory else msg
@@ -117,7 +119,8 @@ class Invoker:
             runtime_meta = self.compute_handler.deploy_runtime(self.runtime_name, runtime_memory, runtime_timeout)
             runtime_meta['runtime_timeout'] = runtime_timeout
             self.internal_storage.put_runtime_meta(runtime_key, runtime_meta)
-
+        end = time.time()
+        print("Deploy_runtime time: ",end-start)
         # Verify python version and lithops version
         if __version__ != runtime_meta['lithops_version']:
             raise Exception("Lithops version mismatch. Host version: {} - Runtime version: {}"
@@ -136,10 +139,14 @@ class Invoker:
         """
         Creates the default pyload dictionary
         """
+        if "custom" in job.function_name:
+            func_key="custom"
+        else:
+            func_key=job.func_key
         payload = {'config': self.config,
                    'chunksize': job.chunksize,
                    'log_level': self.log_level,
-                   'func_key': job.func_key,
+                   'func_key': func_key,
                    'data_key': job.data_key,
                    'extra_env': job.extra_env,
                    'total_calls': job.total_calls,

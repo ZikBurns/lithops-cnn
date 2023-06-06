@@ -124,28 +124,13 @@ def create_map_job_cnn(
     Wrapper to create a map job. It integrates COS logic to process objects.
     """
     host_job_meta = {'host_job_create_tstamp': time.time()}
-    map_iterdata = utils.verify_args(map_function, iterdata, extra_args)
-
-    # Object processing functionality
-    ppo = None
-    if utils.is_object_processing_function(map_function):
-        create_partitions_start = time.time()
-        # Create partitions according chunk_size or chunk_number
-        logger.debug('ExecutorID {} | JobID {} - Calling map on partitions '
-                     'from object storage flow'.format(executor_id, job_id))
-        map_iterdata, ppo = create_partitions(
-            config, internal_storage, map_iterdata,
-            obj_chunk_size, obj_chunk_number, obj_newline
-        )
-        host_job_meta['host_job_create_partitions_time'] = round(time.time() - create_partitions_start, 6)
-    # ########
+    map_iterdata = iterdata
 
     job = _create_job_cnn(
         config=config,
         internal_storage=internal_storage,
         executor_id=executor_id,
         job_id=job_id,
-        func=lambda_function,
         iterdata=map_iterdata,
         chunksize=chunksize,
         runtime_meta=runtime_meta,
@@ -156,9 +141,6 @@ def create_map_job_cnn(
         execution_timeout=execution_timeout,
         host_job_meta=host_job_meta
     )
-
-    if ppo:
-        job.parts_per_object = ppo
 
     return job
 
@@ -390,7 +372,6 @@ def _create_job_cnn(
     internal_storage,
     executor_id,
     job_id,
-    func,
     iterdata,
     runtime_meta,
     runtime_memory,
@@ -460,16 +441,12 @@ def _create_job_cnn(
         inc_modules = None
 
     logger.debug('ExecutorID {} | JobID {} - Serializing function and data'.format(executor_id, job_id))
-    job_serialize_start = time.time()
     serializer = SerializeIndependent(runtime_meta['preinstalls'])
-    func_and_data_ser, mod_paths = serializer([func] + iterdata, inc_modules, exc_modules)
-    data_strs = func_and_data_ser[1:]
+    func_and_data_ser, mod_paths = serializer(iterdata, inc_modules, exc_modules)
+    data_strs = func_and_data_ser
     data_size_bytes = sum(len(x) for x in data_strs)
-    module_data = create_module_data(mod_paths)
-    func_str = func_and_data_ser[0]
 
-    func_module_str = pickle.dumps({'func': func_str, 'module_data': module_data}, -1)
-    func_module_size_bytes = len(func_module_str)
+
 
 
     host_job_meta['host_job_serialize_time'] = 0
@@ -486,8 +463,7 @@ def _create_job_cnn(
                    'of {}'.format(executor_id, job_id, utils.sizeof_fmt(data_limit * 1024**2)))
         raise Exception(log_msg)
 
-    function_hash = hashlib.md5(func_module_str).hexdigest()
-    job.func_key = create_func_key(executor_id, function_hash)
+
     upload_data = not (len(str(data_strs[0])) * job.chunksize < 8 * 1204 and backend in FAAS_BACKENDS)
 
     # upload data
