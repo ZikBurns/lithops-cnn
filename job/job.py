@@ -307,8 +307,6 @@ def _create_job(
     func_module_size_bytes = len(func_module_str)
 
     host_job_meta['host_job_serialize_time'] = round(time.time() - job_serialize_start, 6)
-    with open("./serialize_times.txt", "a") as file_object:
-        file_object.write(str(host_job_meta['host_job_serialize_time']) + '\n')
     host_job_meta['func_data_size_bytes'] = data_size_bytes
     host_job_meta['func_module_size_bytes'] = func_module_size_bytes
 
@@ -338,8 +336,6 @@ def _create_job(
             func_upload_end = time.time()
             host_job_meta['host_func_upload_time'] = round(func_upload_end - func_upload_start, 6)
             print(host_job_meta['host_func_upload_time'] )
-            with open("./upload_times.txt", "a") as file_object:
-                file_object.write(str(host_job_meta['host_func_upload_time'])+'\n')
             FUNCTION_CACHE.add(job.func_key)
         else:
             logger.debug('ExecutorID {} | JobID {} - Function and modules '

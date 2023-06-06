@@ -36,8 +36,8 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-LITHOPS_FUNCTION_ZIP = 'lithops_lambda.zip'
-BUILD_LAYER_FUNCTION_ZIP = 'build_layer.zip'
+LITHOPS_FUNCTION_ZIP = './tmp/lithops_lambda.zip'
+BUILD_LAYER_FUNCTION_ZIP = './tmp/build_layer.zip'
 
 
 class AWSLambdaBackend:

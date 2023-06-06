@@ -241,6 +241,7 @@ def create_handler_zip(dst_zip_location, entry_point_files, entry_point_name=Non
         ep_files = entry_point_files if isinstance(entry_point_files, list) else [entry_point_files]
         with zipfile.ZipFile(dst_zip_location, 'w', zipfile.ZIP_DEFLATED) as lithops_zip:
             module_location = os.path.dirname(os.path.abspath(lithops.__file__))
+            print(module_location)
             for ep_file in ep_files:
                 ep_name = entry_point_name or os.path.basename(ep_file)
                 lithops_zip.write(ep_file, ep_name)

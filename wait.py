@@ -109,11 +109,11 @@ def wait(fs: Union[ResponseFuture, FuturesList, List[ResponseFuture]],
     pbar = None
     if not is_lithops_worker() and logger.getEffectiveLevel() == logging.INFO \
        and show_progressbar:
-        from tqdm.auto import tqdm
+        from tqdm import tqdm
         if not is_notebook():
             print()
         pbar = tqdm(bar_format='  {l_bar}{bar}| {n_fmt}/{total_fmt}  ',
-                    total=fs_to_wait, disable=None)
+                    total=fs_to_wait, disable=False)
         pbar.update(min(len(fs_done), fs_to_wait))
 
     try:
