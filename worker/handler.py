@@ -51,6 +51,22 @@ class ShutdownSentinel:
     """Put an instance of this class on the queue to shut it down"""
     pass
 
+def function_handler_custom(payload):
+    job = SimpleNamespace(**payload)
+    storage_config = extract_storage_config(job.config)
+    internal_storage = InternalStorage(storage_config)
+    job.func = get_function_and_modules(job, internal_storage)
+    job_data = get_function_data(job, internal_storage)
+    print(job.func)
+    print(job_data)
+    data = job_data.pop(0)
+    deserialized_data = pickle.loads(data)
+    print(deserialized_data)
+    deserialized_func = pickle.loads(job.func)
+    print(deserialized_data)
+    result = deserialized_func(deserialized_data['payload'])
+    print(result)
+    return result
 
 def function_handler(payload):
     job = SimpleNamespace(**payload)

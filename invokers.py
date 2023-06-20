@@ -141,28 +141,50 @@ class Invoker:
         """
         if "custom" in job.function_name:
             func_key="custom"
+            if not hasattr(job, "runtime_name"):
+                job.runtime_name="lithops-custom-runtime"
+                job.runtime_memory=3008
+            payload = {'config': self.config,
+                       'chunksize': job.chunksize,
+                       'log_level': self.log_level,
+                       'func_key': func_key,
+                       'data_key': job.data_key,
+                       'extra_env': job.extra_env,
+                       'total_calls': job.total_calls,
+                       'execution_timeout': job.execution_timeout,
+                       'data_byte_ranges': job.data_byte_ranges,
+                       'executor_id': job.executor_id,
+                       'job_id': job.job_id,
+                       'job_key': job.job_key,
+                       'max_workers': self.max_workers,
+                       'call_ids': None,
+                       'host_submit_tstamp': time.time(),
+                       'lithops_version': __version__,
+                       'runtime_name': job.runtime_name,
+                       'runtime_memory': job.runtime_memory,
+                       'data_byte_strs': job.data_byte_strs,
+                       'worker_processes': job.worker_processes}
         else:
             func_key=job.func_key
-        payload = {'config': self.config,
-                   'chunksize': job.chunksize,
-                   'log_level': self.log_level,
-                   'func_key': func_key,
-                   'data_key': job.data_key,
-                   'extra_env': job.extra_env,
-                   'total_calls': job.total_calls,
-                   'execution_timeout': job.execution_timeout,
-                   'data_byte_ranges': job.data_byte_ranges,
-                   'executor_id': job.executor_id,
-                   'job_id': job.job_id,
-                   'job_key': job.job_key,
-                   'max_workers': self.max_workers,
-                   'call_ids': None,
-                   'host_submit_tstamp': time.time(),
-                   'lithops_version': __version__,
-                   'runtime_name': job.runtime_name,
-                   'runtime_memory': job.runtime_memory,
-                   'worker_processes': job.worker_processes}
-
+            payload = {'config': self.config,
+                       'chunksize': job.chunksize,
+                       'log_level': self.log_level,
+                       'func_key': func_key,
+                       'data_key': job.data_key,
+                       'extra_env': job.extra_env,
+                       'total_calls': job.total_calls,
+                       'execution_timeout': job.execution_timeout,
+                       'data_byte_ranges': job.data_byte_ranges,
+                       'executor_id': job.executor_id,
+                       'job_id': job.job_id,
+                       'job_key': job.job_key,
+                       'max_workers': self.max_workers,
+                       'call_ids': None,
+                       'host_submit_tstamp': time.time(),
+                       'lithops_version': __version__,
+                       'runtime_name': job.runtime_name,
+                       'runtime_memory': job.runtime_memory,
+                       'worker_processes': job.worker_processes}
         return payload
 
     def _run_job(self, job):

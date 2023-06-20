@@ -14,19 +14,15 @@
 # limitations under the License.
 #
 
-import shutil
 import os
 import logging
 import boto3
 import time
-import glob
 import json
 import zipfile
 import subprocess
 import botocore.exceptions
 import base64
-import zipfile
-import sys
 
 from botocore.httpsession import URLLib3Session
 from botocore.awsrequest import AWSRequest
@@ -40,8 +36,8 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-LITHOPS_FUNCTION_ZIP = '/tmp/lithops_lambda.zip'
-BUILD_LAYER_FUNCTION_ZIP = '/tmp/build_layer.zip'
+LITHOPS_FUNCTION_ZIP = 'lithops_lambda.zip'
+BUILD_LAYER_FUNCTION_ZIP = 'build_layer.zip'
 
 
 class AWSLambdaBackend:
@@ -55,7 +51,7 @@ class AWSLambdaBackend:
         """
         logger.debug('Creating AWS Lambda client')
 
-        self.name = 'aws_lambda_custom'
+        self.name = 'aws_lambda_default'
         self.type = 'faas'
         self.lambda_config = lambda_config
         self.internal_storage = internal_storage
@@ -63,7 +59,7 @@ class AWSLambdaBackend:
 
         self.user_key = lambda_config['access_key_id'][-4:].lower()
         self.package = f'lithops_v{__version__.replace(".", "-")}_{self.user_key}'
-        self.region_name = lambda_config['region_name']
+        self.region_name = lambda_config['region']
         self.role_arn = lambda_config['execution_role']
 
         logger.debug('Creating Boto3 AWS Session and Lambda Client')
@@ -98,13 +94,11 @@ class AWSLambdaBackend:
         logger.info(f"{msg} - Region: {self.region_name}")
 
     def _format_function_name(self, runtime_name, runtime_memory, version=__version__):
-        if "custom" in runtime_name:
-            return runtime_name
-        else:
-            runtime_name = runtime_name.replace('/', '__').replace('.', '').replace(':', '--')
-            package = self.package.replace(__version__.replace(".", "-"), version.replace(".", "-"))
-            runtime_name = package + '__' + runtime_name
-            return f'{runtime_name}_{runtime_memory}MB'
+        runtime_name = runtime_name.replace('/', '__').replace('.', '').replace(':', '--')
+        package = self.package.replace(__version__.replace(".", "-"), version.replace(".", "-"))
+        runtime_name = package + '__' + runtime_name
+
+        return f'{runtime_name}_{runtime_memory}MB'
 
     @staticmethod
     def _unformat_function_name(function_name):
@@ -121,7 +115,7 @@ class AWSLambdaBackend:
 
     def _get_default_runtime_name(self):
         py_version = utils.CURRENT_PY_VERSION.replace('.', '')
-        return f'lithops-custom-runtime'
+        return f'lithops-default-runtime-v{py_version}'
 
     def _is_container_runtime(self, runtime_name):
         name = runtime_name.split('/', 1)[-1]
@@ -184,23 +178,12 @@ class AWSLambdaBackend:
         @return: layer ARN for the specified runtime or None if it is not deployed
         """
         layers = self._list_layers()
-        if "custom" in runtime_name and len(layers)==1:
-            _, layer_arn = layers[0]
-            return layer_arn
         dep_layer = [layer for layer in layers if layer[0] == self._format_layer_name(runtime_name)]
         if len(dep_layer) == 1:
             _, layer_arn = dep_layer.pop()
             return layer_arn
         else:
             return None
-
-    def _add_directory_to_zip(self, zip_file, full_dir_path, sub_dir=''):
-        for file in os.listdir(full_dir_path):
-            full_path = os.path.join(full_dir_path, file)
-            if os.path.isfile(full_path):
-                zip_file.write(full_path, os.path.join(sub_dir, file), zipfile.ZIP_DEFLATED)
-            elif os.path.isdir(full_path) and '__pycache__' not in full_path:
-                self._add_directory_to_zip(zip_file, full_path, os.path.join(sub_dir, file))
 
     def _create_layer(self, runtime_name):
         """
@@ -231,11 +214,8 @@ class AWSLambdaBackend:
                 Code={
                     'ZipFile': build_layer_zip_bin
                 },
-                Timeout=180,
-                MemorySize=3008,
-                EphemeralStorage = {
-                    'Size': 2048
-                }
+                Timeout=120,
+                MemorySize=512
             )
 
             # wait until the function is created
@@ -246,7 +226,7 @@ class AWSLambdaBackend:
             self._wait_for_function_deployed(func_name)
             logger.debug('OK --> Created "layer builder" function {}'.format(runtime_name))
 
-            dependencies = [dependency.strip().replace(' ', '') for dependency in config.CUSTOM_REQUIREMENTS]
+            dependencies = [dependency.strip().replace(' ', '') for dependency in config.DEFAULT_REQUIREMENTS]
             layer_name = self._format_layer_name(runtime_name)
             payload = {
                 'dependencies': dependencies,
@@ -329,8 +309,6 @@ class AWSLambdaBackend:
         lithops_layers = []
         for layer in layers:
             if 'lithops' in layer['LayerName'] and self.user_key in layer['LayerName']:
-                lithops_layers.append((layer['LayerName'], layer['LatestMatchingVersion']['LayerVersionArn']))
-            if layer['LayerName']=='LayerLithopsTorch':
                 lithops_layers.append((layer['LayerName'], layer['LatestMatchingVersion']['LayerVersionArn']))
         return lithops_layers
 
@@ -416,20 +394,15 @@ class AWSLambdaBackend:
         """
         logger.info(f"Deploying runtime: {runtime_name} - Memory: {memory} - Timeout: {timeout}")
         function_name = self._format_function_name(runtime_name, memory)
-        # if "custom" in runtime_name:
-        #     layer_arn = self._get_layer("")
+
         layer_arn = self._get_layer(runtime_name)
         if not layer_arn:
-            start = time.time()
             layer_arn = self._create_layer(runtime_name)
-            end = time.time()
-            logger.info(f"Layer Creation time: ", end - start)
 
         code = self._create_handler_bin()
         env_vars = {t['name']: t['value'] for t in self.lambda_config['env_vars']}
 
         try:
-            start=time.time()
             response = self.lambda_client.create_function(
                 FunctionName=function_name,
                 Runtime=config.AVAILABLE_PY_RUNTIMES[utils.CURRENT_PY_VERSION],
@@ -473,8 +446,6 @@ class AWSLambdaBackend:
                 raise e
 
         self._wait_for_function_deployed(function_name)
-        end = time.time()
-        print("Function deployment time: ",end-start)
         logger.debug('OK --> Created lambda function {}'.format(function_name))
 
     def _deploy_container_runtime(self, runtime_name, memory, timeout):
@@ -495,7 +466,7 @@ class AWSLambdaBackend:
             images = response['imageDetails']
             if not images:
                 raise Exception(f'Runtime {runtime_name} is not present in ECR.'
-                                'Consider running "lithops runtime build -b aws_lambda_custom ..."')
+                                'Consider running "lithops runtime build -b aws_lambda ..."')
             image = list(filter(lambda image: 'imageTags' in image and tag in image['imageTags'], images)).pop()
             image_digest = image['imageDigest']
         except botocore.exceptions.ClientError:
@@ -559,14 +530,12 @@ class AWSLambdaBackend:
         @param timeout: runtime timeout in seconds
         @return: runtime metadata
         """
-        if "custom" in runtime_name:
-            runtime_meta = self._generate_runtime_meta(runtime_name, memory)
+        if runtime_name == self._get_default_runtime_name():
+            self._deploy_default_runtime(runtime_name, memory, timeout)
         else:
-            if runtime_name == self._get_default_runtime_name():
-                self._deploy_default_runtime(runtime_name, memory, timeout)
-            else:
-                self._deploy_container_runtime(runtime_name, memory, timeout)
-            runtime_meta = self._generate_runtime_meta(runtime_name, memory)
+            self._deploy_container_runtime(runtime_name, memory, timeout)
+
+        runtime_meta = self._generate_runtime_meta(runtime_name, memory)
 
         return runtime_meta
 
@@ -604,7 +573,7 @@ class AWSLambdaBackend:
                 layer = self._format_layer_name(runtime_name, version)
                 self._delete_layer(layer)
 
-    def clean(self):
+    def clean(self, **kwargs):
         """
         Deletes all Lithops lambda runtimes for this user
         """
@@ -660,12 +629,8 @@ class AWSLambdaBackend:
         @param payload: invoke dict payload
         @return: invocation ID
         """
-        if "custom" in runtime_name:
-            function_name="lithops-custom-runtime"
-            response = self.invoke_custom(runtime_name,runtime_memory,payload)
-            return response
-        else:
-            function_name = self._format_function_name(runtime_name, runtime_memory)
+
+        function_name = self._format_function_name(runtime_name, runtime_memory)
 
         headers = {'Host': self.host, 'X-Amz-Invocation-Type': 'Event', 'User-Agent': self.user_agent}
         url = f'https://{self.host}/2015-03-31/functions/{function_name}/invocations'
@@ -708,37 +673,6 @@ class AWSLambdaBackend:
         #         raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
         #     else:
         #         raise Exception(response)
-
-
-    def invoke_custom(self, runtime_name, runtime_memory, payload):
-        """
-        Invoke lambda function asynchronously
-        @param runtime_name: name of the runtime
-        @param runtime_memory: memory of the runtime in MB
-        @param payload: invoke dict payload
-        @return: invocation ID
-        """
-        if "custom" in runtime_name:
-            function_name="lithops-custom-runtime"
-        else:
-            function_name = self._format_function_name(runtime_name, runtime_memory)
-
-        response = self.lambda_client.invoke(
-           FunctionName=function_name,
-            # InvocationType='Event',
-            Payload=json.dumps(payload, default=str)
-         )
-
-        if response['StatusCode'] == 200:
-            return json.loads(response['Payload'].read().decode('utf-8'))
-        else:
-            logger.debug(response)
-            if response['ResponseMetadata']['HTTPStatusCode'] == 401:
-                raise Exception('Unauthorized - Invalid API Key')
-            elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
-                raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
-            else:
-                raise Exception(response)
 
     def get_runtime_key(self, runtime_name, runtime_memory, version=__version__):
         """

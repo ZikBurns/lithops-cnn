@@ -32,7 +32,6 @@ from lithops.job.serialize import SerializeIndependent, create_module_data
 from lithops.constants import MAX_AGG_DATA_SIZE, LOCALHOST,\
     SERVERLESS, STANDALONE, CUSTOM_RUNTIME_DIR, FAAS_BACKENDS
 from lithops.storage import InternalStorage
-from lithops.serverless.backends.aws_lambda_custom.custom_code.function import lambda_function
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +112,6 @@ def create_map_job_cnn(
     include_modules,
     exclude_modules,
     execution_timeout,
-    map_function=lambda_function,
     chunksize=None,
     extra_args=None,
     obj_chunk_size=None,

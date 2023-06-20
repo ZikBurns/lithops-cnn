@@ -16,30 +16,9 @@
 
 import os
 import logging
-import sys
-import PIL
-import zipfile
-import shutil
-
-
-def import_torch():
-    torch_dir = '/tmp/python/torch'
-    sys.path.append(torch_dir)
-    python_dir = '/opt/python'
-    sys.path.append(python_dir)
-    if not os.path.exists(torch_dir):
-        tempdir = '/tmp/python/_torch'
-        if os.path.exists(tempdir):
-            shutil.rmtree(tempdir)
-        zipfile.ZipFile('/opt/python/torch.zip', 'r').extractall(tempdir)
-        os.rename(tempdir, torch_dir)
-
-
-import_torch()
 from lithops.version import __version__
 from lithops.utils import setup_lithops_logger
 from lithops.worker import function_handler
-from lithops.worker.handler import function_handler_custom
 from lithops.worker import function_invoker
 from lithops.worker.utils import get_runtime_metadata
 
@@ -51,10 +30,6 @@ def lambda_handler(event, context):
     os.environ['__LITHOPS_BACKEND'] = 'AWS Lambda'
 
     setup_lithops_logger(event.get('log_level', logging.INFO))
-    if (event['config']['lithops']['backend'] == 'aws_lambda_custom'):
-        logger.info(f"Lithops v{__version__} - Starting CUSTOM AWS Lambda execution")
-        result = function_handler_custom(event)
-        return result
 
     if 'get_metadata' in event:
         logger.info(f"Lithops v{__version__} - Generating metadata")
