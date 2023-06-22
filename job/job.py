@@ -142,7 +142,47 @@ def create_map_job_cnn(
 
     return job
 
+def create_map_job_cnn_asyncio(
+    config,
+    internal_storage,
+    executor_id,
+    job_id,
+    iterdata,
+    runtime_meta,
+    runtime_memory,
+    extra_env,
+    include_modules,
+    exclude_modules,
+    execution_timeout,
+    chunksize=None,
+    extra_args=None,
+    obj_chunk_size=None,
+    obj_newline='\n',
+    obj_chunk_number=None
+):
+    """
+    Wrapper to create a map job. It integrates COS logic to process objects.
+    """
+    host_job_meta = {'host_job_create_tstamp': time.time()}
+    map_iterdata = iterdata
 
+    job = _create_job_cnn_asyncio(
+        config=config,
+        internal_storage=internal_storage,
+        executor_id=executor_id,
+        job_id=job_id,
+        iterdata=map_iterdata,
+        chunksize=chunksize,
+        runtime_meta=runtime_meta,
+        runtime_memory=runtime_memory,
+        extra_env=extra_env,
+        include_modules=include_modules,
+        exclude_modules=exclude_modules,
+        execution_timeout=execution_timeout,
+        host_job_meta=host_job_meta
+    )
+
+    return job
 def create_reduce_job(
     config,
     internal_storage,
@@ -494,6 +534,138 @@ def _create_job_cnn(
     job.metadata = host_job_meta
 
     return job
+
+def _create_job_cnn_asyncio(
+    config,
+    internal_storage,
+    executor_id,
+    job_id,
+    iterdata,
+    runtime_meta,
+    runtime_memory,
+    extra_env,
+    include_modules,
+    exclude_modules,
+    execution_timeout,
+    host_job_meta,
+    chunksize=None
+):
+    """
+    Creates a new Job
+    """
+    global FUNCTION_CACHE
+
+    ext_env = {} if extra_env is None else extra_env.copy()
+    if ext_env:
+        ext_env = utils.convert_bools_to_string(ext_env)
+        logger.debug("Extra environment vars {}".format(ext_env))
+
+    mode = config['lithops']['mode']
+    backend = config['lithops']['backend']
+
+    job = SimpleNamespace()
+    job.chunksize = chunksize or config['lithops']['chunksize']
+    job.worker_processes = config[backend]['worker_processes']
+    job.execution_timeout = execution_timeout or config['lithops']['execution_timeout']
+    job.executor_id = executor_id
+    job.job_id = job_id
+    job.job_key = create_job_key(job.executor_id, job.job_id)
+    job.function_name = "custom_function"
+    job.extra_env = ext_env
+    job.total_calls = len(iterdata)
+
+    if mode == SERVERLESS:
+        job.runtime_memory = runtime_memory or config[backend]['runtime_memory']
+        job.runtime_timeout = runtime_meta['runtime_timeout']
+        if job.execution_timeout >= job.runtime_timeout:
+            job.execution_timeout = job.runtime_timeout - 5
+
+    elif mode in STANDALONE:
+        job.runtime_memory = None
+        runtime_timeout = config[STANDALONE]['hard_dismantle_timeout']
+        if job.execution_timeout >= runtime_timeout:
+            job.execution_timeout = runtime_timeout - 10
+
+    elif mode == LOCALHOST:
+        job.runtime_memory = None
+        job.runtime_timeout = None
+
+    exclude_modules_cfg = config['lithops'].get('exclude_modules', [])
+    include_modules_cfg = config['lithops'].get('include_modules', [])
+
+    exc_modules = set()
+    inc_modules = set()
+    if exclude_modules_cfg:
+        exc_modules.update(exclude_modules_cfg)
+    if exclude_modules:
+        exc_modules.update(exclude_modules)
+    if include_modules_cfg is not None:
+        inc_modules.update(include_modules_cfg)
+    if include_modules_cfg is None and not include_modules:
+        inc_modules = None
+    if include_modules is not None and include_modules:
+        inc_modules.update(include_modules)
+    if include_modules is None:
+        inc_modules = None
+
+    logger.debug('ExecutorID {} | JobID {} - Serializing function and data'.format(executor_id, job_id))
+    serializer = SerializeIndependent(runtime_meta['preinstalls'])
+    func_and_data_ser, mod_paths = serializer(iterdata, inc_modules, exc_modules)
+    data_strs = func_and_data_ser
+    data_size_bytes = sum(len(x) for x in data_strs)
+
+
+
+
+    host_job_meta['host_job_serialize_time'] = 0
+    host_job_meta['func_data_size_bytes'] = 0
+    host_job_meta['func_module_size_bytes'] = 0
+
+    # Check data limit
+    if 'data_limit' in config['lithops']:
+        data_limit = config['lithops']['data_limit']
+    else:
+        data_limit = MAX_AGG_DATA_SIZE
+    if data_limit and data_size_bytes > data_limit * 1024**2:
+        log_msg = ('ExecutorID {} | JobID {} - Total data exceeded maximum size '
+                   'of {}'.format(executor_id, job_id, utils.sizeof_fmt(data_limit * 1024**2)))
+        raise Exception(log_msg)
+
+
+    upload_data = not (len(str(data_strs[0])) * job.chunksize < 8 * 1204 and backend in FAAS_BACKENDS)
+
+    # upload data
+    if upload_data:
+        # Upload iterdata to COS only if a single element is greater than 8KB
+        logger.debug('ExecutorID {} | JobID {} - Uploading data to the storage backend'
+                     .format(executor_id, job_id))
+        # pass_iteradata through an object storage file
+        data_key = create_data_key(executor_id, job_id)
+        job.data_key = data_key
+        data_bytes, data_byte_ranges = utils.agg_data(data_strs)
+        job.data_byte_ranges = data_byte_ranges
+        data_upload_start = time.time()
+        internal_storage.put_data(data_key, data_bytes)
+        data_upload_end = time.time()
+        host_job_meta['host_data_upload_time'] = round(data_upload_end - data_upload_start, 6)
+
+    else:
+        # pass iteradata as part of the invocation payload
+        logger.debug('ExecutorID {} | JobID {} - Data per activation is < '
+                     '{}. Passing data through invocation payload'
+                     .format(executor_id, job_id, utils.sizeof_fmt(8 * 1024)))
+        job.data_key = None
+        job.data_byte_ranges = None
+        job.data_byte_strs = data_strs
+        host_job_meta['host_data_upload_time'] = 0
+
+    host_job_meta['host_job_created_time'] = round(time.time() - host_job_meta['host_job_create_tstamp'], 6)
+
+    job.metadata = host_job_meta
+
+    return job
+
+
 def _store_func_and_modules(
     job_tmp_dir,
     func_key,

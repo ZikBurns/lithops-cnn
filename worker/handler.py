@@ -42,6 +42,7 @@ from lithops.constants import JOBS_PREFIX, LITHOPS_TEMP_DIR, MODULES_DIR
 from lithops.utils import setup_lithops_logger, is_unix_system
 from lithops.worker.status import create_call_status
 from lithops.job.serialize import SerializeIndependent
+from lithops.serverless.backends.aws_lambda_custom.custom_code.function import lambda_function
 pickling_support.install()
 
 logger = logging.getLogger(__name__)
@@ -55,16 +56,13 @@ def function_handler_custom(payload):
     job = SimpleNamespace(**payload)
     storage_config = extract_storage_config(job.config)
     internal_storage = InternalStorage(storage_config)
-    job.func = get_function_and_modules(job, internal_storage)
     job_data = get_function_data(job, internal_storage)
     print(job.func)
     print(job_data)
     data = job_data.pop(0)
     deserialized_data = pickle.loads(data)
     print(deserialized_data)
-    deserialized_func = pickle.loads(job.func)
-    print(deserialized_data)
-    result = deserialized_func(deserialized_data['payload'])
+    result = lambda_function(deserialized_data['payload'])
     print(result)
     return result
 
