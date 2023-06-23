@@ -660,8 +660,8 @@ class AWSLambdaBackend:
         @param payload: invoke dict payload
         @return: invocation ID
         """
+
         if "custom" in runtime_name:
-            function_name="lithops-custom-runtime"
             response = self.invoke_custom(runtime_name,runtime_memory,payload)
             return response
         else:
@@ -718,6 +718,7 @@ class AWSLambdaBackend:
         @param payload: invoke dict payload
         @return: invocation ID
         """
+        print("Starting invocation", payload)
         if "custom" in runtime_name:
             function_name="lithops-custom-runtime"
         else:
@@ -728,7 +729,7 @@ class AWSLambdaBackend:
             # InvocationType='Event',
             Payload=json.dumps(payload, default=str)
          )
-
+        print("Finished invocation", payload)
         if response['StatusCode'] == 200:
             return json.loads(response['Payload'].read().decode('utf-8'))
         else:

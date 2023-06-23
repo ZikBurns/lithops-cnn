@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 import concurrent
+import json
 import os
 import sys
 import copy
@@ -28,6 +29,10 @@ from typing import Optional, List, Union, Tuple, Dict, Any
 from collections.abc import Callable
 from datetime import datetime
 import asyncio
+
+import aioboto3
+import aiobotocore
+from aiobotocore.session import AioSession
 from lithops import constants
 from lithops.future import ResponseFuture
 from lithops.invokers import create_invoker
@@ -143,6 +148,20 @@ class FunctionExecutor:
         elif self.mode == SERVERLESS:
             serverless_config = extract_serverless_config(self.config)
             self.compute_handler = ServerlessHandler(serverless_config, self.internal_storage)
+            self.aws_config = serverless_config[serverless_config['backend']]
+            # self.session_token = self.aws_config.get('session_token')
+            # self.aws_session = aioboto3.Session(
+            #     aws_access_key_id=self.aws_config['access_key_id'],
+            #     aws_secret_access_key=self.aws_config['secret_access_key'],
+            #     aws_session_token=self.aws_config.get('session_token'),
+            #     region_name=self.aws_config['region_name']
+            # )
+            # self.aws_client = self.aws_session.client(
+            #     'lambda', region_name=self.aws_config['region_name'],
+            #     aws_access_key_id=self.aws_config['access_key_id'],
+            #     aws_secret_access_key=self.aws_config['secret_access_key'],
+            #     aws_session_token=self.aws_config.get('session_token')
+            # )
         elif self.mode == STANDALONE:
             standalone_config = extract_standalone_config(self.config)
             self.compute_handler = StandaloneHandler(standalone_config)
@@ -532,6 +551,8 @@ class FunctionExecutor:
         results = await asyncio.gather(*tasks)
         return results
 
+
+
     async def map_cnn_asyncio_alt(
         self,
         map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
@@ -580,7 +601,8 @@ class FunctionExecutor:
         tasks = []
         for payload in payloads:
             task = asyncio.get_event_loop().run_in_executor(
-                None, self.compute_handler.invoke, payload
+                None, time.sleep, 1
+                # None, self.compute_handler.invoke, payload
             )
             tasks.append(task)
         end = time.time()
@@ -588,8 +610,255 @@ class FunctionExecutor:
         results = await asyncio.gather(*tasks)
         return results
 
+    async def map_cnn_asyncio_alt_aioboto3(
+        self,
+        map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
+        chunksize: Optional[int] = None,
+        extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        runtime_memory: Optional[int] = None,
+        obj_chunk_size: Optional[int] = None,
+        obj_chunk_number: Optional[int] = None,
+        obj_newline: Optional[str] = '\n',
+        timeout: Optional[int] = None,
+        include_modules: Optional[List[str]] = [],
+        exclude_modules: Optional[List[str]] = []
+    ):
+        start = time.time()
+        job_id = self._create_job_id('M')
+        self.last_call = 'map'
 
-    async def map_cnn_asyncio_futures(
+        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
+
+        job = create_map_job_cnn_asyncio(
+            config=self.config,
+            internal_storage=self.internal_storage,
+            executor_id=self.executor_id,
+            job_id=job_id,
+            iterdata=map_iterdata,
+            chunksize=chunksize,
+            runtime_meta=runtime_meta,
+            runtime_memory=runtime_memory,
+            extra_env=extra_env,
+            include_modules=include_modules,
+            exclude_modules=exclude_modules,
+            execution_timeout=timeout,
+            extra_args=extra_args,
+            obj_chunk_size=obj_chunk_size,
+            obj_chunk_number=obj_chunk_number,
+            obj_newline=obj_newline
+        )
+        payload_default = self.invoker._create_payload(job)
+        payloads=[]
+        for payload in map_iterdata:
+            tmp_payload= copy.deepcopy(payload_default)
+            tmp_payload['data_byte_strs']=payload
+            payloads.append(tmp_payload)
+        self.compute_handler.invoke, payload
+        tasks = []
+
+
+
+        async def run_invoke(payload):
+            print(f'>task {payload} executing')
+            function_name = "lithops-custom-runtime"
+            async with self.aws_session.client(
+            'lambda', region_name=self.aws_config['region_name'],
+            aws_access_key_id=self.aws_config['access_key_id'],
+            aws_secret_access_key=self.aws_config['secret_access_key'],
+            aws_session_token=self.aws_config.get('session_token')
+            ) as lambda_client:
+                response = await lambda_client.invoke(
+                    FunctionName = function_name,
+                    Payload = json.dumps(payload, default=str)
+                    )
+            result = await response['Payload'].read()
+            return json.loads(result.decode('utf-8'))
+
+        for payload in payloads:
+            task = run_invoke(payload)
+            tasks.append(task)
+
+        end = time.time()
+        print("Preparations:", (end-start))
+        results = await asyncio.gather(*tasks)
+        return results
+
+    def map_cnn_asyncio_alt_2(
+        self,
+        map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
+        chunksize: Optional[int] = None,
+        extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        runtime_memory: Optional[int] = None,
+        obj_chunk_size: Optional[int] = None,
+        obj_chunk_number: Optional[int] = None,
+        obj_newline: Optional[str] = '\n',
+        timeout: Optional[int] = None,
+        include_modules: Optional[List[str]] = [],
+        exclude_modules: Optional[List[str]] = []
+    ):
+        job_id = self._create_job_id('M')
+        self.last_call = 'map'
+
+        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
+
+        job = create_map_job_cnn_asyncio(
+            config=self.config,
+            internal_storage=self.internal_storage,
+            executor_id=self.executor_id,
+            job_id=job_id,
+            iterdata=map_iterdata,
+            chunksize=chunksize,
+            runtime_meta=runtime_meta,
+            runtime_memory=runtime_memory,
+            extra_env=extra_env,
+            include_modules=include_modules,
+            exclude_modules=exclude_modules,
+            execution_timeout=timeout,
+            extra_args=extra_args,
+            obj_chunk_size=obj_chunk_size,
+            obj_chunk_number=obj_chunk_number,
+            obj_newline=obj_newline
+        )
+        payload_default = self.invoker._create_payload(job)
+        payloads=[]
+        for payload in map_iterdata:
+            tmp_payload= copy.deepcopy(payload_default)
+            tmp_payload['data_byte_strs']=payload
+            payloads.append(tmp_payload)
+
+
+        async def waiting_function(seconds):
+            await asyncio.sleep(seconds)
+            return seconds
+
+        async def invoke_lambda_async(payload):
+            result = await self.compute_handler.invoke_async(payload)
+            return result
+
+        self.i = 0
+        async def invoke_lambda(payload,session):
+            self.i=self.i+1
+            temp_i = self.i
+            print(self.i)
+            function_name = "lithops-custom-runtime"
+            async with session.create_client('lambda',
+            region_name=self.aws_config['region_name'],
+            aws_access_key_id=self.aws_config['access_key_id'],
+            aws_secret_access_key=self.aws_config['secret_access_key'],
+            aws_session_token=self.aws_config.get('session_token')) as client:
+                response = await client.invoke(FunctionName=function_name,Payload=json.dumps(payload, default=str))
+                result = await response['Payload'].read()
+                return json.loads(result.decode('utf-8'))
+
+        def generate_invocations(payloads, session):
+            for payload in payloads:
+                yield invoke_lambda(payload, session)
+
+        loop = asyncio.get_event_loop()
+        session = AioSession(None)
+        async def wrapped():
+            invocations = generate_invocations(payloads, session)
+            return await asyncio.gather(*invocations)
+
+        return loop.run_until_complete(wrapped())
+
+
+    async def map_cnn_asyncio_alt_2_mixed(
+        self,
+        map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
+        chunksize: Optional[int] = None,
+        extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        runtime_memory: Optional[int] = None,
+        obj_chunk_size: Optional[int] = None,
+        obj_chunk_number: Optional[int] = None,
+        obj_newline: Optional[str] = '\n',
+        timeout: Optional[int] = None,
+        include_modules: Optional[List[str]] = [],
+        exclude_modules: Optional[List[str]] = []
+    ):
+        job_id = self._create_job_id('M')
+        self.last_call = 'map'
+
+        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
+
+        job = create_map_job_cnn_asyncio(
+            config=self.config,
+            internal_storage=self.internal_storage,
+            executor_id=self.executor_id,
+            job_id=job_id,
+            iterdata=map_iterdata,
+            chunksize=chunksize,
+            runtime_meta=runtime_meta,
+            runtime_memory=runtime_memory,
+            extra_env=extra_env,
+            include_modules=include_modules,
+            exclude_modules=exclude_modules,
+            execution_timeout=timeout,
+            extra_args=extra_args,
+            obj_chunk_size=obj_chunk_size,
+            obj_chunk_number=obj_chunk_number,
+            obj_newline=obj_newline
+        )
+        payload_default = self.invoker._create_payload(job)
+        payloads=[]
+        for payload in map_iterdata:
+            tmp_payload= copy.deepcopy(payload_default)
+            tmp_payload['data_byte_strs']=payload
+            payloads.append(tmp_payload)
+
+
+        async def waiting_function(seconds):
+            await asyncio.sleep(seconds)
+            return seconds
+
+        async def invoke_lambda_async(payload):
+            result = await self.compute_handler.invoke_async(payload)
+            return result
+
+        self.i = 0
+        async def invoke_lambda(payload,session):
+            self.i=self.i+1
+            temp_i = self.i
+            print(self.i)
+            function_name = "lithops-custom-runtime"
+            async with session.create_client('lambda',
+            region_name=self.aws_config['region_name'],
+            aws_access_key_id=self.aws_config['access_key_id'],
+            aws_secret_access_key=self.aws_config['secret_access_key'],
+            aws_session_token=self.aws_config.get('session_token')) as client:
+                response = await client.invoke(FunctionName=function_name,Payload=json.dumps(payload, default=str))
+                result = await response['Payload'].read()
+                return json.loads(result.decode('utf-8'))
+
+        def generate_invocations(payloads, session):
+            for payload in payloads:
+                yield invoke_lambda(payload, session)
+
+        def execute_chunk(chunk_payload):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            session = AioSession(None)
+            async def wrapped():
+                invocations = generate_invocations(chunk_payload, session)
+                return await asyncio.gather(*invocations)
+
+            return loop.run_until_complete(wrapped())
+
+        def divide_chunks(l, n):
+            # looping till length l
+            for i in range(0, len(l), n):
+                yield l[i:i + n]
+
+        chunked_list = list(divide_chunks(payloads, 10))
+        with ThreadPoolExecutor(max_workers=len(chunked_list)) as executor:
+            results = list(executor.map(execute_chunk, chunked_list))
+        return  results
+
+
+    def map_cnn_asyncio_futures(
         self,
         map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
         chunksize: Optional[int] = None,
@@ -635,9 +904,13 @@ class FunctionExecutor:
             payloads.append(tmp_payload)
         end = time.time()
         print("Preparations:", (end-start))
-        with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
-            results = list(executor.map(self.compute_handler.invoke, payloads))
-        return results
+        async def general_executor(payloads):
+            with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+                results = list(executor.map(self.compute_handler.invoke, payloads))
+            return results
+        return asyncio.run(general_executor(payloads))
+
+
 
 
     def map_reduce(
