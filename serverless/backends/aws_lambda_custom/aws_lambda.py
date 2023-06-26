@@ -116,6 +116,8 @@ class AWSLambdaBackend:
         return version, runtime_name, runtime_memory.replace('MB', '')
 
     def _format_layer_name(self, runtime_name, version=__version__):
+        if "custom" in runtime_name:
+            return '_'.join([runtime_name, 'layer'])
         package = self.package.replace(__version__.replace(".", ""), version.replace(".", ""))
         return '_'.join([package, runtime_name, 'layer'])
 
@@ -345,7 +347,8 @@ class AWSLambdaBackend:
                 FunctionName=function_name
             )
         except botocore.exceptions.ClientError as err:
-            raise err
+            logger.debug(f'Function: {function_name} does not exist')
+            return None
 
         if response['ResponseMetadata']['HTTPStatusCode'] == 204:
             logger.debug('OK --> Deleted function {}'.format(function_name))
@@ -423,7 +426,7 @@ class AWSLambdaBackend:
             start = time.time()
             layer_arn = self._create_layer(runtime_name)
             end = time.time()
-            logger.info(f"Layer Creation time: ", end - start)
+            logger.info(f"Layer Creation time: {end-start}" )
 
         code = self._create_handler_bin()
         env_vars = {t['name']: t['value'] for t in self.lambda_config['env_vars']}
@@ -560,6 +563,7 @@ class AWSLambdaBackend:
         @return: runtime metadata
         """
         if "custom" in runtime_name:
+            self._deploy_default_runtime(runtime_name, memory, timeout)
             runtime_meta = self._generate_runtime_meta(runtime_name, memory)
         else:
             if runtime_name == self._get_default_runtime_name():

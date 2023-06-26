@@ -94,7 +94,7 @@ class Invoker:
         logger.debug(f'ExecutorID {self.executor_id} - Invoker initialized.'
                      f' Max workers: {self.max_workers}')
 
-    def select_runtime(self, job_id, runtime_memory):
+    def select_runtime(self, job_id, runtime_memory, reset=False):
         """
         Return the runtime metadata
         """
@@ -110,6 +110,10 @@ class Invoker:
         if "custom" in self.runtime_name:
             noruntimekey = runtime_key.rsplit('/', 1)[0] + '/'
             runtime_key = noruntimekey+'lithops-custom-runtime'
+        if reset:
+            self.compute_handler.delete_runtime(self.runtime_name, runtime_memory, __version__)
+            self.internal_storage.delete_runtime_meta(runtime_key)
+
         runtime_meta = self.internal_storage.get_runtime_meta(runtime_key)
         start=time.time()
         if not runtime_meta:

@@ -20,6 +20,7 @@ import sys
 import PIL
 import zipfile
 import shutil
+from time import time
 
 
 def import_torch():
@@ -35,13 +36,16 @@ def import_torch():
         os.rename(tempdir, torch_dir)
 
 
+start = time()
 import_torch()
+end = time()
+print("import torch time", end - start)
 from lithops.version import __version__
 from lithops.utils import setup_lithops_logger
 from lithops.worker import function_handler
-from lithops.worker.handler import function_handler_custom
 from lithops.worker import function_invoker
 from lithops.worker.utils import get_runtime_metadata
+from lithops.serverless.backends.aws_lambda_custom.custom_code.function import lambda_function
 
 logger = logging.getLogger('lithops.worker')
 
@@ -51,9 +55,13 @@ def lambda_handler(event, context):
     os.environ['__LITHOPS_BACKEND'] = 'AWS Lambda'
 
     setup_lithops_logger(event.get('log_level', logging.INFO))
-    if (event['config']['lithops']['backend'] == 'aws_lambda_custom'):
-        logger.info(f"Lithops v{__version__} - Starting CUSTOM AWS Lambda execution")
-        result = function_handler_custom(event)
+    print(event)
+    if 'get_metadata' in event:
+        logger.info(f"Lithops v{__version__} - Generating metadata")
+        return get_runtime_metadata()
+    elif (event['config']['lithops']['backend'] == 'aws_lambda_custom'):
+        print('CUSTOM FUNCTION')
+        result = lambda_function(event['data_byte_strs']['payload'])
         return result
 
     if 'get_metadata' in event:
@@ -67,3 +75,4 @@ def lambda_handler(event, context):
         function_handler(event)
 
     return {"Execution": "Finished"}
+
