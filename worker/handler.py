@@ -52,22 +52,6 @@ class ShutdownSentinel:
     """Put an instance of this class on the queue to shut it down"""
     pass
 
-def function_handler_custom(payload):
-    # job = SimpleNamespace(**payload)
-    # storage_config = extract_storage_config(job.config)
-    # internal_storage = InternalStorage(storage_config)
-    # job_data = get_function_data(job, internal_storage)
-    # print(job.func)
-    # print(job_data)
-    # data = job_data.pop(0)
-    # deserialized_data = pickle.loads(data)
-    # print(deserialized_data)
-    # result = lambda_function(deserialized_data['payload'])
-    # print(result)
-    # return result
-    result = lambda_function(payload['data_byte_strs']['payload'])
-    return result
-
 def function_handler(payload):
     job = SimpleNamespace(**payload)
     setup_lithops_logger(job.log_level)

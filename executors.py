@@ -343,6 +343,7 @@ class FunctionExecutor:
         tasks.append(task)
         results = await asyncio.gather(*tasks)
         return results
+
     def map(
         self,
         map_function: Callable,
@@ -534,8 +535,6 @@ class FunctionExecutor:
         print("Preparations:", (end-start))
         results = await asyncio.gather(*tasks)
         return results
-
-
 
     async def map_cnn_asyncio_alt(
         self,
