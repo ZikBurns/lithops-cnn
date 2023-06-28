@@ -55,7 +55,7 @@ class AWSLambdaBackend:
         """
         logger.debug('Creating AWS Lambda client')
 
-        self.name = 'aws_lambda_custom'
+        self.name = 'aws_lambda_custom_orchestrator'
         self.type = 'faas'
         self.lambda_config = lambda_config
         self.internal_storage = internal_storage
@@ -78,7 +78,9 @@ class AWSLambdaBackend:
         self.lambda_client = self.aws_session.client(
             'lambda', region_name=self.region_name,
             config=botocore.client.Config(
-                user_agent_extra=self.user_agent
+                user_agent_extra=self.user_agent,
+                read_timeout = 900,
+                connect_timeout = 900
             )
         )
 
@@ -118,7 +120,7 @@ class AWSLambdaBackend:
 
     def _get_default_runtime_name(self):
         py_version = utils.CURRENT_PY_VERSION.replace('.', '')
-        return f'lithops-custom-runtime-v{py_version}'
+        return f'lithops-orchestrator-runtime-v{py_version}'
 
 
     def _is_container_runtime(self, runtime_name):
@@ -213,17 +215,20 @@ class AWSLambdaBackend:
             build_layer_file = os.path.join(current_location, 'build_layer.py')
             build_layer_zip.write(build_layer_file, 'build_layer.py', zipfile.ZIP_DEFLATED)
 
-        func_name = '_'.join([self.package, 'layer_builder'])
+        func_name = '_'.join([self.package, 'layer_builder_orchestrator'])
 
         with open(BUILD_LAYER_FUNCTION_ZIP, 'rb') as build_layer_zip:
             build_layer_zip_bin = build_layer_zip.read()
 
         logger.debug('Creating "layer builder" function')
-
+        try:
+            self.lambda_client.delete_function(FunctionName=func_name)
+        except botocore.exceptions.ClientError as err:
+            if err.response['Error']['Code'] != 'ResourceNotFoundException':
+                raise
         try:
             resp = self.lambda_client.create_function(
                 FunctionName=func_name,
-                Description="aws:states:opt-out",
                 Runtime=config.AVAILABLE_PY_RUNTIMES[utils.CURRENT_PY_VERSION],
                 Role=self.role_arn,
                 Handler='build_layer.lambda_handler',
@@ -493,7 +498,7 @@ class AWSLambdaBackend:
             images = response['imageDetails']
             if not images:
                 raise Exception(f'Runtime {runtime_name} is not present in ECR.'
-                                'Consider running "lithops runtime build -b aws_lambda_custom ..."')
+                                'Consider running "lithops runtime build -b aws_lambda_custom_orchestrator ..."')
             image = list(filter(lambda image: 'imageTags' in image and tag in image['imageTags'], images)).pop()
             image_digest = image['imageDigest']
         except botocore.exceptions.ClientError:
@@ -665,7 +670,7 @@ class AWSLambdaBackend:
         @return: invocation ID
         """
 
-        if "custom" in runtime_name:
+        if "orchestrator" in runtime_name:
             response = self.invoke_custom(runtime_name,runtime_memory,payload)
             return response
         else:
@@ -722,15 +727,14 @@ class AWSLambdaBackend:
         @param payload: invoke dict payload
         @return: invocation ID
         """
-        print("Starting invocation", payload)
+        # print("Starting invocation", payload)
         function_name = self._format_function_name(runtime_name, runtime_memory)
 
         response = self.lambda_client.invoke(
            FunctionName=function_name,
-            # InvocationType='Event',
             Payload=json.dumps(payload, default=str)
          )
-        print("Finished invocation", payload)
+        # print("Finished invocation", payload)
         if response['StatusCode'] == 200:
             return json.loads(response['Payload'].read().decode('utf-8'))
         else:

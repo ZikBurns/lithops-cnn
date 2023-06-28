@@ -94,7 +94,7 @@ class Invoker:
         logger.debug(f'ExecutorID {self.executor_id} - Invoker initialized.'
                      f' Max workers: {self.max_workers}')
 
-    def select_runtime(self, job_id, runtime_memory, reset=False):
+    def select_runtime(self, job_id, runtime_memory):
         """
         Return the runtime metadata
         """
@@ -107,15 +107,7 @@ class Invoker:
         msg = msg + f'- {runtime_memory}MB' if runtime_memory else msg
         logger.info(msg)
         runtime_key = self.compute_handler.get_runtime_key(self.runtime_name, runtime_memory, __version__)
-        if "custom" in self.runtime_name:
-            noruntimekey = runtime_key.rsplit('/', 1)[0] + '/'
-            runtime_key = noruntimekey+'lithops-custom-runtime'
-        if reset:
-            self.compute_handler.delete_runtime(self.runtime_name, runtime_memory, __version__)
-            self.internal_storage.delete_runtime_meta(runtime_key)
-
         runtime_meta = self.internal_storage.get_runtime_meta(runtime_key)
-        start=time.time()
         if not runtime_meta:
             msg = f'Runtime {self.runtime_name}'
             msg = msg + f' with {runtime_memory}MB' if runtime_memory else msg
@@ -123,8 +115,7 @@ class Invoker:
             runtime_meta = self.compute_handler.deploy_runtime(self.runtime_name, runtime_memory, runtime_timeout)
             runtime_meta['runtime_timeout'] = runtime_timeout
             self.internal_storage.put_runtime_meta(runtime_key, runtime_meta)
-        end = time.time()
-        print("Deploy_runtime time: ",end-start)
+
         # Verify python version and lithops version
         if __version__ != runtime_meta['lithops_version']:
             raise Exception("Lithops version mismatch. Host version: {} - Runtime version: {}"
@@ -143,52 +134,26 @@ class Invoker:
         """
         Creates the default pyload dictionary
         """
-        if "custom" in job.function_name:
-            func_key="custom"
-            if not hasattr(job, "runtime_name"):
-                job.runtime_name="lithops-custom-runtime"
-                job.runtime_memory=3008
-            payload = {'config': self.config,
-                       'chunksize': job.chunksize,
-                       'log_level': self.log_level,
-                       'func_key': func_key,
-                       'data_key': job.data_key,
-                       'extra_env': job.extra_env,
-                       'total_calls': job.total_calls,
-                       'execution_timeout': job.execution_timeout,
-                       'data_byte_ranges': job.data_byte_ranges,
-                       'executor_id': job.executor_id,
-                       'job_id': job.job_id,
-                       'job_key': job.job_key,
-                       'max_workers': self.max_workers,
-                       'call_ids': None,
-                       'host_submit_tstamp': time.time(),
-                       'lithops_version': __version__,
-                       'runtime_name': job.runtime_name,
-                       'runtime_memory': job.runtime_memory,
-                       'data_byte_strs': job.data_byte_strs,
-                       'worker_processes': job.worker_processes}
-        else:
-            func_key=job.func_key
-            payload = {'config': self.config,
-                       'chunksize': job.chunksize,
-                       'log_level': self.log_level,
-                       'func_key': func_key,
-                       'data_key': job.data_key,
-                       'extra_env': job.extra_env,
-                       'total_calls': job.total_calls,
-                       'execution_timeout': job.execution_timeout,
-                       'data_byte_ranges': job.data_byte_ranges,
-                       'executor_id': job.executor_id,
-                       'job_id': job.job_id,
-                       'job_key': job.job_key,
-                       'max_workers': self.max_workers,
-                       'call_ids': None,
-                       'host_submit_tstamp': time.time(),
-                       'lithops_version': __version__,
-                       'runtime_name': job.runtime_name,
-                       'runtime_memory': job.runtime_memory,
-                       'worker_processes': job.worker_processes}
+        payload = {'config': self.config,
+                   'chunksize': job.chunksize,
+                   'log_level': self.log_level,
+                   'func_key': job.func_key,
+                   'data_key': job.data_key,
+                   'extra_env': job.extra_env,
+                   'total_calls': job.total_calls,
+                   'execution_timeout': job.execution_timeout,
+                   'data_byte_ranges': job.data_byte_ranges,
+                   'executor_id': job.executor_id,
+                   'job_id': job.job_id,
+                   'job_key': job.job_key,
+                   'max_workers': self.max_workers,
+                   'call_ids': None,
+                   'host_submit_tstamp': time.time(),
+                   'lithops_version': __version__,
+                   'runtime_name': job.runtime_name,
+                   'runtime_memory': job.runtime_memory,
+                   'worker_processes': job.worker_processes}
+
         return payload
 
     def _run_job(self, job):
@@ -287,20 +252,6 @@ class BatchInvoker(Invoker):
                      .format(job.executor_id, job.job_id, resp_time, activation_id or job.job_key))
 
     def run_job(self, job):
-        """
-        Run a job
-        """
-        # Ensure only self.max_workers are started
-        total_workers = job.total_calls // job.chunksize + (job.total_calls % job.chunksize > 0)
-        if self.max_workers < total_workers:
-            job.chunksize = job.total_calls // self.max_workers + (job.total_calls % self.max_workers > 0)
-
-        # Perform the invocation
-        futures = self._run_job(job)
-        self.job_monitor.start(futures)
-
-        return futures
-    def run_job_cnn(self, job):
         """
         Run a job
         """

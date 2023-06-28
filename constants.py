@@ -84,7 +84,7 @@ CLEANER_PID_FILE = os.path.join(CLEANER_DIR, 'cleaner.pid')
 CLEANER_LOG_FILE = os.path.join(CLEANER_DIR, 'cleaner.log')
 
 HOME_DIR = os.path.expanduser('~')
-CONFIG_DIR = os.path.join('/tmp/home', '.lithops')
+CONFIG_DIR = os.path.join('/tmp', '.lithops')
 CACHE_DIR = os.path.join(CONFIG_DIR, 'cache')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config')
 CONFIG_FILE_GLOBAL = os.path.join("/etc", "lithops", "config")
@@ -96,6 +96,7 @@ SERVERLESS_BACKENDS = [
     'openwhisk',
     'aws_lambda',
     'aws_lambda_custom',
+    'aws_lambda_custom_orchestrator',
     'aws_lambda_default',
     'aws_batch',
     'gcp_cloudrun',
@@ -119,6 +120,7 @@ FAAS_BACKENDS = [
     'openwhisk',
     'aws_lambda',
     'aws_lambda_custom',
+    'aws_lambda_custom_orchestrator',
     'aws_lambda_default',
     'gcp_cloudrun',
     'gcp_functions',

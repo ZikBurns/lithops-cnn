@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 import concurrent
-import json
 import os
 import sys
 import copy
@@ -51,7 +50,7 @@ from lithops.utils import FuturesList
 logger = logging.getLogger(__name__)
 CLEANER_PROCESS = None
 from concurrent.futures import ThreadPoolExecutor
-
+from lithops.version import __version__
 
 class FunctionExecutor:
     """
@@ -85,7 +84,6 @@ class FunctionExecutor:
         remote_invoker: Optional[bool] = None,
         log_level: Optional[str] = False
     ):
-        self.reset=reset
         self.is_lithops_worker = is_lithops_worker()
         self.executor_id = create_executor_id()
         self.futures = []
@@ -169,6 +167,10 @@ class FunctionExecutor:
         logger.debug(f'Function executor for {self.backend} created with ID: {self.executor_id}')
 
         self.log_path = None
+        if reset:
+            self.reset = reset
+            self.clean_runtime()
+
 
     def __enter__(self):
         """ Context manager method """
@@ -184,6 +186,12 @@ class FunctionExecutor:
         job_id = str(self.total_jobs).zfill(3)
         self.total_jobs += 1
         return '{}{}'.format(call_type, job_id)
+
+    def clean_runtime(self):
+        self.reset=True
+        runtime_key = self.compute_handler.get_runtime_key(self.invoker.runtime_name, self.invoker.runtime_info["runtime_memory"], __version__)
+        self.compute_handler.delete_runtime(self.invoker.runtime_name, self.invoker.runtime_info["runtime_memory"], __version__)
+        self.internal_storage.delete_runtime_meta(runtime_key)
 
     def call_async(
         self,
@@ -310,7 +318,7 @@ class FunctionExecutor:
         result = await loop.run_in_executor(executor, lambda: self.compute_handler.invoke(payload))
         return result
 
-    async def call_async_cnn_asyncio_alt(
+    def call_async_cnn_asyncio_orchestrator(
         self,
         data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
         extra_env: Optional[Dict] = None,
@@ -324,7 +332,7 @@ class FunctionExecutor:
 
         runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
 
-        job = create_map_job_cnn(config=self.config,
+        job = create_map_job_cnn_asyncio(config=self.config,
                                  internal_storage=self.internal_storage,
                                  executor_id=self.executor_id,
                                  job_id=job_id,
@@ -335,14 +343,17 @@ class FunctionExecutor:
                                  include_modules=include_modules,
                                  exclude_modules=exclude_modules,
                                  execution_timeout=timeout)
+        job.func_key = "custom"
+        job.runtime_name = self.invoker.runtime_name
+        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
         payload = self.invoker._create_payload(job)
-        tasks = []
-        task=asyncio.get_event_loop().run_in_executor(
-            None, self.compute_handler.invoke, payload
-        )
-        tasks.append(task)
-        results = await asyncio.gather(*tasks)
-        return results
+        payload["body"]=data
+        payload["reset"]=self.reset
+        async def general_executor(payload):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                results = list(executor.map(self.compute_handler.invoke, payload))
+            return results
+        return asyncio.run(general_executor([payload]))
 
     def map(
         self,
@@ -593,7 +604,7 @@ class FunctionExecutor:
         results = await asyncio.gather(*tasks)
         return results
 
-    def map_cnn_asyncio_futures(
+    def map_cnn_threading(
         self,
         map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
         chunksize: Optional[int] = None,
@@ -611,7 +622,7 @@ class FunctionExecutor:
         job_id = self._create_job_id('M')
         self.last_call = 'map'
 
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory, self.reset)
+        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
 
         job = create_map_job_cnn_asyncio(
             config=self.config,
@@ -631,6 +642,9 @@ class FunctionExecutor:
             obj_chunk_number=obj_chunk_number,
             obj_newline=obj_newline
         )
+        job.func_key="custom"
+        job.runtime_name = self.invoker.runtime_name
+        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
         payload_default = self.invoker._create_payload(job)
         payloads=[]
         for payload in map_iterdata:

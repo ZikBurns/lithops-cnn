@@ -59,7 +59,7 @@ USER_RUNTIME_PREFIX = 'lithops.user_runtimes'
 
 DEFAULT_CONFIG_KEYS = {
     'runtime_timeout': 180,  # Default: 180 seconds => 3 minutes
-    'runtime_memory': 256,  # Default memory: 256 MB
+    'runtime_memory': 3008,  # Default memory: 256 MB
     'max_workers': 1000,
     'worker_processes': 1,
     'invoke_pool_threads': 64,

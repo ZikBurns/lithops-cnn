@@ -42,7 +42,6 @@ from lithops.constants import JOBS_PREFIX, LITHOPS_TEMP_DIR, MODULES_DIR
 from lithops.utils import setup_lithops_logger, is_unix_system
 from lithops.worker.status import create_call_status
 from lithops.job.serialize import SerializeIndependent
-from lithops.serverless.backends.aws_lambda_custom.custom_code.function import lambda_function
 pickling_support.install()
 
 logger = logging.getLogger(__name__)

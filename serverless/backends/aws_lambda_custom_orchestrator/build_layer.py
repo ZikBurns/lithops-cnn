@@ -90,12 +90,6 @@ def install_dependencies(event):
                 os.remove(matching_package)
                 print(f"File {matching_package} removed.")
 
-    # Create a ZIP archive of the "torch" directory
-    torch_path = os.path.join(LAYER_DIR_PATH, 'torch')
-    if os.path.isdir(torch_path):
-        shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH,'torch')
-        shutil.rmtree(torch_path)
-
 def lambda_handler(event, context):
 
 

@@ -22,9 +22,6 @@ import pickle
 import platform
 import subprocess
 from contextlib import contextmanager
-from lithops.job.serialize import SerializeIndependent, create_module_data
-from lithops.serverless.backends.aws_lambda_custom.custom_code.function import lambda_function
-
 from lithops.version import __version__ as lithops_ver
 from lithops.utils import sizeof_fmt, is_unix_system, b64str_to_bytes
 from lithops.constants import LITHOPS_TEMP_DIR, MODULES_DIR
@@ -49,28 +46,10 @@ def get_function_and_modules(job, internal_storage):
         func_path = '/'.join([LITHOPS_TEMP_DIR, job.func_key])
         with open(func_path, "rb") as f:
             func_obj = f.read()
-        loaded_func_all = pickle.loads(func_obj)
-
-    elif job.config['lithops']['backend'] == 'aws_lambda_custom':
-        if os.path.exists("/tmp/func_obj.pkl"):
-            with open("/tmp/func_obj.pkl", "rb") as file:
-                loaded_func_all = pickle.load(file)
-        else:
-            metadata = get_runtime_metadata()
-            print(metadata['preinstalls'])
-            serializer = SerializeIndependent(metadata['preinstalls'])
-            func_and_data_ser, mod_paths = serializer([lambda_function], set(), set())
-            func_str = func_and_data_ser[0]
-            with open("/tmp/func_obj.pkl", "wb") as file:
-                pickle.dump({'func': func_str}, file, -1)
-
-            # Load func_obj from the file
-            loaded_func_all = {'func': func_str}
-            print(loaded_func_all)
-
     else:
         func_obj = internal_storage.get_func(job.func_key)
-        loaded_func_all = pickle.loads(func_obj)
+
+    loaded_func_all = pickle.loads(func_obj)
 
     if loaded_func_all.get('module_data'):
         module_path = os.path.join(MODULES_DIR, job.job_key)
@@ -97,10 +76,7 @@ def get_function_and_modules(job, internal_storage):
             with open(full_filename, 'wb') as fid:
                 fid.write(b64str_to_bytes(m_data))
 
-    print(loaded_func_all['func'])
     return loaded_func_all['func']
-
-
 def get_function_data(job, internal_storage):
     """
     Get function data (iteradata) from storage

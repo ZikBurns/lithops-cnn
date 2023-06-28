@@ -10,5 +10,5 @@ def lambda_function(payload):
     result = {'predictions': predictions['predictions']}
     return {
         'statusCode': 200,
-        'body': json.dumps(result)
+        'body': result
     }
