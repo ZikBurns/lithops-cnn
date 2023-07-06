@@ -6,7 +6,7 @@ def lambda_function(payload):
     payload = payload["body"]
     if isinstance(payload, str):
         payload = json.loads(payload)
-    predictions = PredictResource("/opt/torchscript_model.pt").execute_inference(payload)
+    predictions = PredictResource("/opt/model.pt").execute_inference(payload)
     result = {'predictions': predictions['predictions']}
     return {
         'statusCode': 200,

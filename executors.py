@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 import concurrent
+import json
 import os
 import sys
 import copy
@@ -47,6 +48,9 @@ from lithops.serverless.serverless import ServerlessHandler
 from lithops.storage.utils import create_job_key, CloudObject
 from lithops.monitor import JobMonitor
 from lithops.utils import FuturesList
+from lithops.serve.api_gateway import APIGateway
+from requests import post, get
+
 logger = logging.getLogger(__name__)
 CLEANER_PROCESS = None
 from concurrent.futures import ThreadPoolExecutor
@@ -167,8 +171,8 @@ class FunctionExecutor:
         logger.debug(f'Function executor for {self.backend} created with ID: {self.executor_id}')
 
         self.log_path = None
+        self.reset = reset
         if reset:
-            self.reset = reset
             self.clean_runtime()
 
 
@@ -192,6 +196,11 @@ class FunctionExecutor:
         runtime_key = self.compute_handler.get_runtime_key(self.invoker.runtime_name, self.invoker.runtime_info["runtime_memory"], __version__)
         self.compute_handler.delete_runtime(self.invoker.runtime_name, self.invoker.runtime_info["runtime_memory"], __version__)
         self.internal_storage.delete_runtime_meta(runtime_key)
+        if ("api_gateway" in self.config):
+            api_gateway = APIGateway(self.config)
+            api_gateway.delete_api_gateway()
+
+
 
     def call_async(
         self,
@@ -349,11 +358,73 @@ class FunctionExecutor:
         payload = self.invoker._create_payload(job)
         payload["body"]=data
         payload["reset"]=self.reset
+        # with open('payload.txt', 'w') as file:
+        #     file.write(json.dumps(payload, indent=4))
         async def general_executor(payload):
             with ThreadPoolExecutor(max_workers=1) as executor:
                 results = list(executor.map(self.compute_handler.invoke, payload))
             return results
         return asyncio.run(general_executor([payload]))
+
+
+    def call_async_cnn_apigateway(
+        self,
+        data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
+        extra_env: Optional[Dict] = None,
+        runtime_memory: Optional[int] = None,
+        timeout: Optional[int] = None,
+        include_modules: Optional[List] = [],
+        exclude_modules: Optional[List] = []
+    ):
+        job_id = self._create_job_id('A')
+        self.last_call = 'call_async'
+
+        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
+        if("api_gateway" in self.config):
+            func_name = self.compute_handler.get_func_name(self.invoker.runtime_name,self.invoker.runtime_info["runtime_memory"])
+            api_gateway = APIGateway(self.config)
+            api_url = api_gateway.get_api_gateway_url()
+            if not api_url:
+                api_gateway.delete_api_gateway()
+                api_url = api_gateway.create_api_gateway(func_name)
+
+        job = create_map_job_cnn_asyncio(config=self.config,
+                                 internal_storage=self.internal_storage,
+                                 executor_id=self.executor_id,
+                                 job_id=job_id,
+                                 iterdata=[data],
+                                 runtime_meta=runtime_meta,
+                                 runtime_memory=runtime_memory,
+                                 extra_env=extra_env,
+                                 include_modules=include_modules,
+                                 exclude_modules=exclude_modules,
+                                 execution_timeout=timeout)
+        job.func_key = "custom"
+        job.runtime_name = self.invoker.runtime_name
+        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
+        payload = self.invoker._create_payload(job)
+        payload["body"]=data
+        payload["reset"]=self.reset
+        def call_api_test(doc=None):
+            if doc:
+                resp = post(url=api_url+"/off-sample/predict",json=doc, timeout=120)
+            # else:
+            #     resp = get(url=self.api_endpoint + url)
+            if resp.status_code == 200:
+                print("HOLA")
+                return resp.json()
+            else:
+                print("EXCEPTION")
+                raise Exception(resp.content.decode())
+
+        async def general_executor(payload):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                results = list(executor.map(call_api_test, payload))
+            return results
+        return asyncio.run(general_executor([payload]))
+
+
+
 
     def map(
         self,

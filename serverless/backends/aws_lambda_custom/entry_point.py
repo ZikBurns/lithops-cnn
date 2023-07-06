@@ -22,9 +22,16 @@ import zipfile
 import shutil
 from time import time
 
+import boto3
+
 
 def import_torch():
+    if not os.path.exists('/tmp/python'):
+        os.mkdir('/tmp/python')
+    s3_client = boto3.client('s3')
+    s3_client.download_file('off-sample', 'torch.zip', '/tmp/python/torch.zip')
     torch_dir = '/tmp/python/torch'
+    # append the torch_dir to PATH so python can find it
     sys.path.append(torch_dir)
     python_dir = '/opt/python'
     sys.path.append(python_dir)
@@ -32,7 +39,7 @@ def import_torch():
         tempdir = '/tmp/python/_torch'
         if os.path.exists(tempdir):
             shutil.rmtree(tempdir)
-        zipfile.ZipFile('/opt/python/torch.zip', 'r').extractall(tempdir)
+        zipfile.ZipFile('/tmp/python/torch.zip', 'r').extractall(tempdir)
         os.rename(tempdir, torch_dir)
 
 

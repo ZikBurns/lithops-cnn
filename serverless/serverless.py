@@ -118,3 +118,6 @@ class ServerlessHandler:
         Wrapper method that returns the type of the backend (Batch or FaaS)
         """
         return self.backend.type
+
+    def get_func_name(self,runtime_name, memory):
+        return self.backend._format_function_name(runtime_name, memory)

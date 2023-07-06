@@ -100,8 +100,7 @@ def lambda_handler(event, context):
         if e.response['Error']['Code'] == "404":
             # The key does not exist.
             install_dependencies(event)
-            s3.download_file(event['bucket'], "torchscript_model.pt",
-                                 os.path.join(TEMP_PATH, 'modules') + '/torchscript_model.pt')
+            s3.download_file(event['bucket'], "model.pt", os.path.join(TEMP_PATH, 'modules') + '/model.pt')
 
             with zipfile.ZipFile(LAYER_ZIP_PATH, 'w') as layer_zip:
                 add_directory_to_zip(layer_zip, os.path.join(TEMP_PATH, 'modules'))

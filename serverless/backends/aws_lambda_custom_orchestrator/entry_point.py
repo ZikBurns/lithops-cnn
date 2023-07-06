@@ -16,6 +16,7 @@
 
 import os
 import logging
+import json
 import sys
 import PIL
 import zipfile
@@ -37,6 +38,8 @@ def lambda_handler(event, context):
     os.environ['__LITHOPS_BACKEND'] = 'AWS Lambda'
 
     setup_lithops_logger(event.get('log_level', logging.INFO))
+    if "resource" in event:
+        event = json.loads(event["body"])
     print(event)
     if 'get_metadata' in event:
         logger.info(f"Lithops v{__version__} - Generating metadata")

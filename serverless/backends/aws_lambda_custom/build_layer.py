@@ -7,7 +7,7 @@ import sys
 import shutil
 import glob
 from botocore.errorfactory import ClientError
-
+import zipfile
 TEMP_PATH = '/tmp'
 LAYER_DIR_PATH = os.path.join(TEMP_PATH, 'modules', 'python')
 LAYER_ZIP_PATH = '/tmp/layer.zip'
@@ -92,9 +92,9 @@ def install_dependencies(event):
 
     # Create a ZIP archive of the "torch" directory
     torch_path = os.path.join(LAYER_DIR_PATH, 'torch')
-    if os.path.isdir(torch_path):
-        shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH,'torch')
-        shutil.rmtree(torch_path)
+
+
+
 
 def lambda_handler(event, context):
 
@@ -106,8 +106,26 @@ def lambda_handler(event, context):
         if e.response['Error']['Code'] == "404":
             # The key does not exist.
             install_dependencies(event)
-            s3.download_file(event['bucket'], "torchscript_model.pt",
-                                 os.path.join(TEMP_PATH, 'modules') + '/torchscript_model.pt')
+
+            torch_path = os.path.join(LAYER_DIR_PATH, 'torch')
+            tmp_torch_path = '/tmp/torch'
+            os.mkdir(tmp_torch_path)
+            shutil.copytree(torch_path, tmp_torch_path+"/torch")
+            with zipfile.ZipFile('/tmp/torch.zip', "w", compression=zipfile.ZIP_DEFLATED, compresslevel=0) as zipf:
+                for root, _, files in os.walk(tmp_torch_path):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        zipf.write(file_path, arcname=os.path.relpath(file_path, tmp_torch_path))
+
+            with open('/tmp/torch.zip', 'rb') as torch_zip:
+                s3.put_object(Body=torch_zip, Bucket=event['bucket'], Key='torch.zip')
+
+            if os.path.isdir(torch_path):
+                shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH, 'torch')
+                shutil.rmtree(torch_path)
+
+
+            s3.download_file(event['bucket'], "model.pt", os.path.join(TEMP_PATH, 'modules') + '/model.pt')
 
             with zipfile.ZipFile(LAYER_ZIP_PATH, 'w') as layer_zip:
                 add_directory_to_zip(layer_zip, os.path.join(TEMP_PATH, 'modules'))
@@ -117,6 +135,8 @@ def lambda_handler(event, context):
                 s3.put_object(Body=layer_zip, Bucket=event['bucket'], Key=event['key'])
 
             print("layer in S3")
+
+
         else:
             # Something else has gone wrong.
             return {

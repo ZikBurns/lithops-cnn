@@ -30,5 +30,5 @@ def lambda_function(event):
     print("Map time: ", end - start, " secs")
     return {
         'statusCode': 200,
-        'body': ["Map time: " + str(end - start) + " seconds", "FunctionExecutor time: " + str(time_fexec) + " secs", result]
+        'body': json.dumps(["Map time: " + str(end - start) + " seconds", "FunctionExecutor time: " + str(time_fexec) + " secs", result])
     }

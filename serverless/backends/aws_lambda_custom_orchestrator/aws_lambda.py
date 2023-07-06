@@ -220,6 +220,9 @@ class AWSLambdaBackend:
         with open(BUILD_LAYER_FUNCTION_ZIP, 'rb') as build_layer_zip:
             build_layer_zip_bin = build_layer_zip.read()
 
+
+        self.internal_storage.storage.storage_handler.upload_file("model.pt", self.internal_storage.bucket)
+
         logger.debug('Creating "layer builder" function')
         try:
             self.lambda_client.delete_function(FunctionName=func_name)
