@@ -38,4 +38,18 @@ class LithopsServe:
         resp = post(url=api_url + "/off-sample/predict", json=json.dumps(doc), timeout=120)
         return resp.json()
 
+    def enqueue(self,
+            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
+            extra_env: Optional[Dict] = None,
+            runtime_memory: Optional[int] = None,
+            timeout: Optional[int] = None,
+    ):
+        return self.fexec.call_async_cnn_sqs(data=data,extra_env=extra_env,runtime_memory=runtime_memory,timeout=timeout)
 
+    def enqueue_multiple(self,
+                         data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
+                         extra_env: Optional[Dict] = None,
+                         runtime_memory: Optional[int] = None,
+                         timeout: Optional[int] = None,
+    ):
+        return self.fexec.map_cnn_sqs(map_iterdata=data, extra_env=extra_env, runtime_memory=runtime_memory, timeout=timeout)

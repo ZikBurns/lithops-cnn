@@ -28,7 +28,8 @@ from lithops.utils import setup_lithops_logger
 from lithops.worker import function_handler
 from lithops.worker import function_invoker
 from lithops.worker.utils import get_runtime_metadata
-from lithops.serverless.backends.aws_lambda_custom_orchestrator.custom_code.function import lambda_function
+from lithops.serverless.backends.aws_lambda_custom_orchestrator.custom_code.function import lambda_function, \
+    lambda_function_sqs
 
 logger = logging.getLogger('lithops.worker')
 
@@ -38,8 +39,13 @@ def lambda_handler(event, context):
     os.environ['__LITHOPS_BACKEND'] = 'AWS Lambda'
 
     setup_lithops_logger(event.get('log_level', logging.INFO))
+
     if "resource" in event:
         event = json.loads(event["body"])
+    elif "Records" in event:
+        return lambda_function_sqs(event["Records"])
+        event = json.loads(event["Records"][0]["body"])
+
     print(event)
     if 'get_metadata' in event:
         logger.info(f"Lithops v{__version__} - Generating metadata")
@@ -60,4 +66,5 @@ def lambda_handler(event, context):
         function_handler(event)
 
     return {"Execution": "Finished"}
+
 

@@ -50,6 +50,7 @@ from lithops.monitor import JobMonitor
 from lithops.utils import FuturesList
 from lithops.serve.api_gateway import APIGateway
 from requests import post, get
+from lithops.serve.sqs import SQSManager
 
 logger = logging.getLogger(__name__)
 CLEANER_PROCESS = None
@@ -174,6 +175,12 @@ class FunctionExecutor:
         self.reset = reset
         if reset:
             self.clean_runtime()
+            if self.config["sqs"]:
+                sqs_name = "off-sample-lithops.fifo"
+                sqs_manager = SQSManager(self.config)
+                if sqs_manager.queue_exists(sqs_name):
+                    sqs_manager.delete_queue(sqs_name)
+
 
 
     def __enter__(self):
@@ -423,6 +430,58 @@ class FunctionExecutor:
             return results
         return asyncio.run(general_executor([payload]))
 
+
+    def call_async_cnn_sqs(
+        self,
+        data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
+        extra_env: Optional[Dict] = None,
+        runtime_memory: Optional[int] = None,
+        timeout: Optional[int] = None,
+        include_modules: Optional[List] = [],
+        exclude_modules: Optional[List] = []
+    ):
+        job_id = self._create_job_id('A')
+        self.last_call = 'call_async'
+
+        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
+        func_name = self.compute_handler.get_func_name(self.invoker.runtime_name,self.invoker.runtime_info["runtime_memory"])
+        sqs_name = "off-sample-lithops.fifo"
+        sqs_manager=SQSManager(self.config)
+        if sqs_manager.queue_exists(sqs_name):
+            sqs_url = sqs_manager.get_queue_url(sqs_name)
+        if not sqs_manager.queue_exists(sqs_name):
+            # sqs_manager.delete_queue(sqs_name)
+            sqs_url=sqs_manager.create_queue(sqs_name)
+            sqs_manager.wait_for_queue_creation(sqs_name)
+            sqs_manager.delete_trigger(sqs_name,func_name)
+            sqs_manager.configure_trigger(sqs_url,func_name)
+
+        del self.config["sqs"]
+        job = create_map_job_cnn_asyncio(config=self.config,
+                                 internal_storage=self.internal_storage,
+                                 executor_id=self.executor_id,
+                                 job_id=job_id,
+                                 iterdata=[data],
+                                 runtime_meta=runtime_meta,
+                                 runtime_memory=runtime_memory,
+                                 extra_env=extra_env,
+                                 include_modules=include_modules,
+                                 exclude_modules=exclude_modules,
+                                 execution_timeout=timeout)
+        job.func_key = "custom"
+        job.runtime_name = self.invoker.runtime_name
+        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
+        payload = self.invoker._create_payload(job)
+        payload["body"]=data
+        payload["reset"]=self.reset
+        def enqueue(payload):
+            sqs_manager.send_message(queue_url=sqs_url,payload=payload)
+
+        async def general_executor(payload):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                results = list(executor.map(enqueue, payload))
+            return results
+        return asyncio.run(general_executor([payload]))
 
 
 
@@ -730,7 +789,73 @@ class FunctionExecutor:
             return results
         return asyncio.run(general_executor(payloads))
 
+    def map_cnn_sqs(
+        self,
+        map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
+        chunksize: Optional[int] = None,
+        extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        runtime_memory: Optional[int] = None,
+        obj_chunk_size: Optional[int] = None,
+        obj_chunk_number: Optional[int] = None,
+        obj_newline: Optional[str] = '\n',
+        timeout: Optional[int] = None,
+        include_modules: Optional[List[str]] = [],
+        exclude_modules: Optional[List[str]] = []
+    ):
+        job_id = self._create_job_id('M')
+        self.last_call = 'map'
 
+        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
+        func_name = self.compute_handler.get_func_name(self.invoker.runtime_name,self.invoker.runtime_info["runtime_memory"])
+        sqs_name = "off-sample-lithops.fifo"
+        sqs_manager=SQSManager(self.config)
+        if sqs_manager.queue_exists(sqs_name):
+            sqs_url = sqs_manager.get_queue_url(sqs_name)
+        if not sqs_manager.queue_exists(sqs_name):
+            # sqs_manager.delete_queue(sqs_name)
+            sqs_url=sqs_manager.create_queue(sqs_name)
+            sqs_manager.delete_trigger(sqs_name,func_name)
+            sqs_manager.configure_trigger(sqs_url,func_name)
+
+        job = create_map_job_cnn_asyncio(
+            config=self.config,
+            internal_storage=self.internal_storage,
+            executor_id=self.executor_id,
+            job_id=job_id,
+            iterdata=map_iterdata,
+            chunksize=chunksize,
+            runtime_meta=runtime_meta,
+            runtime_memory=runtime_memory,
+            extra_env=extra_env,
+            include_modules=include_modules,
+            exclude_modules=exclude_modules,
+            execution_timeout=timeout,
+            extra_args=extra_args,
+            obj_chunk_size=obj_chunk_size,
+            obj_chunk_number=obj_chunk_number,
+            obj_newline=obj_newline
+        )
+        job.func_key = "custom"
+        job.runtime_name = self.invoker.runtime_name
+        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
+        payload_default = self.invoker._create_payload(job)
+        payloads = []
+        for payload in map_iterdata:
+            tmp_payload = copy.deepcopy(payload_default)
+            tmp_payload['body'] = payload
+            tmp_payload["reset"] = self.reset
+            payloads.append(tmp_payload)
+
+        def enqueue(payload):
+            results = sqs_manager.send_message(queue_url=sqs_url, payload=payload)
+            return results
+
+        async def general_executor(payloads):
+            with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+                results = list(executor.map(enqueue, payloads))
+            return results
+        return asyncio.run(general_executor(payloads))
 
 
     def map_reduce(

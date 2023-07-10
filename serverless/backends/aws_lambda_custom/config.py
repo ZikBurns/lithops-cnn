@@ -64,7 +64,7 @@ DEFAULT_CONFIG_KEYS = {
     'worker_processes': 1,
     'invoke_pool_threads': 64,
     'architecture': 'x86_64',
-    'ephemeral_storage': 512,
+    'ephemeral_storage': 2048,
     'env_vars': {},
     'vpc': {'subnets': [], 'security_groups': []},
     'efs': []

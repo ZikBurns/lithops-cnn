@@ -482,6 +482,12 @@ class AWSLambdaBackend:
         end = time.time()
         print("Function deployment time: ",end-start)
         logger.debug('OK --> Created lambda function {}'.format(function_name))
+        response = self.lambda_client.put_function_concurrency(
+            FunctionName=function_name,
+            ReservedConcurrentExecutions=1
+        )
+        logger.debug('OK --> lambda function {} reserved concurrency set to 1'.format(function_name))
+
 
     def _deploy_container_runtime(self, runtime_name, memory, timeout):
         """

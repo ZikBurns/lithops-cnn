@@ -1,4 +1,5 @@
 import json
+import boto3
 from lithops import FunctionExecutor
 from time import time
 
@@ -32,3 +33,16 @@ def lambda_function(event):
         'statusCode': 200,
         'body': json.dumps(["Map time: " + str(end - start) + " seconds", "FunctionExecutor time: " + str(time_fexec) + " secs", result])
     }
+
+def lambda_function_sqs(records):
+    lambda_client = boto3.client('lambda')
+    response = lambda_client.get_account_settings()
+    unreserved_concurrency = response['AccountLimit']['UnreservedConcurrentExecutions']
+    print(unreserved_concurrency)
+    print(len(records))
+    results=[]
+    for record in records:
+        event=json.loads(record["body"])
+        result=lambda_function(event)
+        results.append(result)
+    return results
