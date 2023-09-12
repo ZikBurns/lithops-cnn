@@ -26,7 +26,8 @@ DEFAULT_REQUIREMENTS = [
     'pika',
     'cloudpickle',
     'ps-mem',
-    'tblib'
+    'tblib',
+    'aiobotocore'
 ]
 
 AVAILABLE_PY_RUNTIMES = {

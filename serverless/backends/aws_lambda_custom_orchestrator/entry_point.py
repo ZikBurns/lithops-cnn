@@ -22,14 +22,13 @@ import PIL
 import zipfile
 import shutil
 from time import time
-
 from lithops.version import __version__
 from lithops.utils import setup_lithops_logger
 from lithops.worker import function_handler
 from lithops.worker import function_invoker
 from lithops.worker.utils import get_runtime_metadata
 from lithops.serverless.backends.aws_lambda_custom_orchestrator.custom_code.function import lambda_function, \
-    lambda_function_sqs
+    lambda_function_sqs, lambda_function_sqs_serial
 
 logger = logging.getLogger('lithops.worker')
 
@@ -45,6 +44,7 @@ def lambda_handler(event, context):
     elif "Records" in event:
         return lambda_function_sqs(event["Records"])
         event = json.loads(event["Records"][0]["body"])
+        return lambda_function(event)
 
     print(event)
     if 'get_metadata' in event:
@@ -66,5 +66,7 @@ def lambda_handler(event, context):
         function_handler(event)
 
     return {"Execution": "Finished"}
+
+
 
 

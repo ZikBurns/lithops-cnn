@@ -19,11 +19,12 @@ class LithopsServe:
     def run_orchestrator(
             self,
             data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
+            force_cold: bool = False,
             extra_env: Optional[Dict] = None,
             runtime_memory: Optional[int] = None,
             timeout: Optional[int] = None,
     ):
-        return self.fexec.call_async_cnn_asyncio_orchestrator(data=data,extra_env=extra_env,runtime_memory=runtime_memory,timeout=timeout)
+        return self.fexec.call_async_cnn_asyncio_orchestrator(data=data,force_cold = force_cold, extra_env=extra_env,runtime_memory=runtime_memory,timeout=timeout)
 
     def run_orchestrator_apigateway(
             self,

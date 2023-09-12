@@ -41,6 +41,7 @@ DEFAULT_REQUIREMENTS = [
 CUSTOM_REQUIREMENTS = [
     'lithops',
     'six',
+    'aiobotocore',
     'urllib3==1.26.15',
     'https://download.pytorch.org/whl/cpu/torch-1.0.1-cp37-cp37m-linux_x86_64.whl',
     'torchvision==0.2.2',

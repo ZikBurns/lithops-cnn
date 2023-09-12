@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import resource
 import shutil
 import os
 import logging
@@ -27,7 +28,7 @@ import botocore.exceptions
 import base64
 import zipfile
 import sys
-
+import time
 from botocore.httpsession import URLLib3Session
 from botocore.awsrequest import AWSRequest
 from botocore.auth import SigV4Auth
@@ -78,6 +79,9 @@ class AWSLambdaBackend:
         self.lambda_client = self.aws_session.client(
             'lambda', region_name=self.region_name,
             config=botocore.client.Config(
+                max_pool_connections=5000,
+                read_timeout=900,
+                connect_timeout=900,
                 user_agent_extra=self.user_agent
             )
         )
@@ -97,6 +101,8 @@ class AWSLambdaBackend:
         msg = COMPUTE_CLI_MSG.format('AWS Lambda')
         logger.info(f"{msg} - Region: {self.region_name}")
 
+    def close(self):
+        self.aws_session.close()
     def _format_function_name(self, runtime_name, runtime_memory, version=__version__):
         runtime_name = runtime_name.replace('/', '__').replace('.', '').replace(':', '--')
         package = self.package.replace(__version__.replace(".", "-"), version.replace(".", "-"))
@@ -119,7 +125,6 @@ class AWSLambdaBackend:
     def _get_default_runtime_name(self):
         py_version = utils.CURRENT_PY_VERSION.replace('.', '')
         return f'lithops-custom-runtime-v{py_version}'
-
 
     def _is_container_runtime(self, runtime_name):
         name = runtime_name.split('/', 1)[-1]
@@ -182,7 +187,7 @@ class AWSLambdaBackend:
         @return: layer ARN for the specified runtime or None if it is not deployed
         """
         layers = self._list_layers()
-        if "custom" in self.user_key and len(layers)==1:
+        if "custom" in self.user_key and len(layers) == 1:
             _, layer_arn = layers[0]
             return layer_arn
         dep_layer = [layer for layer in layers if layer[0] == self._format_layer_name(runtime_name)]
@@ -232,7 +237,7 @@ class AWSLambdaBackend:
                 },
                 Timeout=180,
                 MemorySize=3008,
-                EphemeralStorage = {
+                EphemeralStorage={
                     'Size': 2048
                 }
             )
@@ -329,7 +334,7 @@ class AWSLambdaBackend:
         for layer in layers:
             if 'lithops' in layer['LayerName'] and self.user_key in layer['LayerName']:
                 lithops_layers.append((layer['LayerName'], layer['LatestMatchingVersion']['LayerVersionArn']))
-            if layer['LayerName']=='LayerLithopsTorch':
+            if layer['LayerName'] == 'LayerLithopsTorch':
                 lithops_layers.append((layer['LayerName'], layer['LatestMatchingVersion']['LayerVersionArn']))
         return lithops_layers
 
@@ -421,13 +426,13 @@ class AWSLambdaBackend:
             start = time.time()
             layer_arn = self._create_layer(runtime_name)
             end = time.time()
-            logger.info(f"Layer Creation time: {end-start}" )
+            logger.info(f"Layer Creation time: {end - start}")
 
         code = self._create_handler_bin()
         env_vars = {t['name']: t['value'] for t in self.lambda_config['env_vars']}
 
         try:
-            start=time.time()
+            start = time.time()
             response = self.lambda_client.create_function(
                 FunctionName=function_name,
                 Runtime=config.AVAILABLE_PY_RUNTIMES[utils.CURRENT_PY_VERSION],
@@ -446,7 +451,7 @@ class AWSLambdaBackend:
                 },
                 FileSystemConfigs=[
                     {'Arn': efs_conf['access_point'],
-                        'LocalMountPath': efs_conf['mount_path']}
+                     'LocalMountPath': efs_conf['mount_path']}
                     for efs_conf in self.lambda_config['efs']
                 ],
                 Tags={
@@ -472,7 +477,7 @@ class AWSLambdaBackend:
 
         self._wait_for_function_deployed(function_name)
         end = time.time()
-        print("Function deployment time: ",end-start)
+        print("Function deployment time: ", end - start)
         logger.debug('OK --> Created lambda function {}'.format(function_name))
 
     def _deploy_container_runtime(self, runtime_name, memory, timeout):
@@ -521,7 +526,7 @@ class AWSLambdaBackend:
                 },
                 FileSystemConfigs=[
                     {'Arn': efs_conf['access_point'],
-                        'LocalMountPath': efs_conf['mount_path']}
+                     'LocalMountPath': efs_conf['mount_path']}
                     for efs_conf in self.lambda_config['efs']
                 ],
                 Tags={
@@ -639,7 +644,8 @@ class AWSLambdaBackend:
 
         def get_runtimes(response):
             for function in response['Functions']:
-                if function['FunctionName'].startswith('lithops_v') and self.user_key in function['FunctionName'] and "layer_builder" not in function['FunctionName']:
+                if function['FunctionName'].startswith('lithops_v') and self.user_key in function[
+                    'FunctionName'] and "layer_builder" not in function['FunctionName']:
                     version, rt_name, rt_memory = self._unformat_function_name(function['FunctionName'])
                     runtimes.append((rt_name, rt_memory, version))
 
@@ -666,7 +672,7 @@ class AWSLambdaBackend:
         """
 
         if "custom" in runtime_name:
-            response = self.invoke_custom(runtime_name,runtime_memory,payload)
+            response = self.invoke_custom(runtime_name, runtime_memory, payload)
             return response
         else:
             function_name = self._format_function_name(runtime_name, runtime_memory)
@@ -713,8 +719,26 @@ class AWSLambdaBackend:
         #     else:
         #         raise Exception(response)
 
-
     def invoke_custom(self, runtime_name, runtime_memory, payload):
+        # def get_open_file_descriptor_count():
+        #     proc_fd_path = '/proc/self/fd'
+        #     return len(os.listdir(proc_fd_path))
+        #
+        # def get_max_file_descriptor_limit():
+        #     limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+        #     return limits[1]
+        #
+        # def print_file_descriptor_count_before():
+        #     current_limit = get_open_file_descriptor_count()
+        #     max_limit = get_max_file_descriptor_limit()
+        #     print(f"Open file descriptors before: {current_limit}/{max_limit}")
+        #
+        # def print_file_descriptor_count_after():
+        #     current_limit = get_open_file_descriptor_count()
+        #     max_limit = get_max_file_descriptor_limit()
+        #     print(f"Open file descriptors after: {current_limit}/{max_limit}")
+
+
         """
         Invoke lambda function asynchronously
         @param runtime_name: name of the runtime
@@ -722,25 +746,41 @@ class AWSLambdaBackend:
         @param payload: invoke dict payload
         @return: invocation ID
         """
-        print("Starting invocation", payload)
+        # print("Starting invocation", payload)
         function_name = self._format_function_name(runtime_name, runtime_memory)
+        max_attempts = 1  # Maximum number of retry attempts
+        attempt = 1
 
-        response = self.lambda_client.invoke(
-           FunctionName=function_name,
-            # InvocationType='Event',
-            Payload=json.dumps(payload, default=str)
-         )
-        print("Finished invocation", payload)
-        if response['StatusCode'] == 200:
-            return json.loads(response['Payload'].read().decode('utf-8'))
-        else:
-            logger.debug(response)
-            if response['ResponseMetadata']['HTTPStatusCode'] == 401:
-                raise Exception('Unauthorized - Invalid API Key')
-            elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
-                raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
-            else:
-                raise Exception(response)
+        while attempt <= max_attempts:
+            try:
+                print("Invocating: ", payload)
+                response = self.lambda_client.invoke(
+                    FunctionName=function_name,
+                    Payload=json.dumps(payload, default=str)
+                )
+                print("Invocation finished: ", response)
+                # print("Finished invocation", payload)
+                if response['StatusCode'] == 200:
+                    return json.loads(response['Payload'].read().decode('utf-8'))
+                else:
+                    logger.debug(response)
+                    if response['ResponseMetadata']['HTTPStatusCode'] == 401:
+                        raise Exception('Unauthorized - Invalid API Key')
+                    elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
+                        raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
+                    else:
+                        raise Exception(response)
+            except Exception as e:
+                # Handle the exception, you can log the error or perform any other action
+                logger.error(f"Invocation attempt {attempt} failed with error: {str(e)}")
+                attempt += 1
+                time.sleep(1)
+                # response = self.lambda_client.get_account_settings()
+                # unreserved_concurrency = response['AccountLimit']['UnreservedConcurrentExecutions']
+                # print("Concurrency after error",unreserved_concurrency)
+
+        # Reached the maximum number of attempts, raise an exception or perform any other action
+        raise Exception(f"Failed to invoke function after {max_attempts} attempts")
 
     def get_runtime_key(self, runtime_name, runtime_memory, version=__version__):
         """
@@ -796,3 +836,56 @@ class AWSLambdaBackend:
             return result
         else:
             raise Exception('An error occurred: {}'.format(result))
+
+    def close(self):
+        self.lambda_client.close()
+
+    def _wait_for_function_cold(self, func_name):
+        """
+        Helper function which waits for the lambda to be deployed (state is 'Active').
+        Raises exception if waiting times out or if state is 'Failed' or 'Inactive'
+        """
+        retries, sleep_seconds = (15, 25) if 'vpc' in self.lambda_config else (30, 5)
+
+        while retries > 0:
+            res = self.lambda_client.get_function_configuration(FunctionName=func_name)
+            state = res['LastUpdateStatus']
+            if state == 'InProgress':
+                time.sleep(sleep_seconds)
+                logger.debug('"{}" function is being deployed... '
+                             '(status: {})'.format(func_name, res['LastUpdateStatus']))
+                retries -= 1
+                if retries == 0:
+                    raise Exception('"{}" function not deployed (timed out): {}'.format(func_name, res))
+            elif state == 'Failed' or state == 'Inactive':
+                raise Exception('"{}" function not deployed (state is "{}"): {}'.format(func_name, state, res))
+            elif state == 'Successful':
+                break
+
+        logger.debug('Ok --> function "{}" is cold now'.format(func_name))
+
+    def force_cold(self,runtime_name, runtime_memory):
+        import random
+        function_name = self._format_function_name(runtime_name, runtime_memory)
+        response = self.lambda_client.update_function_configuration(
+            FunctionName=function_name,
+            MemorySize=runtime_memory,
+            Environment={
+                'Variables': {
+                    'Random': str(random.random())
+                }
+            },
+        )
+        self._wait_for_function_cold(function_name)
+        if response['MemorySize'] == runtime_memory:
+            return True
+        else:
+            logger.debug(response)
+            if response['ResponseMetadata']['HTTPStatusCode'] == 401:
+                raise Exception('Unauthorized - Invalid API Key')
+            elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
+                raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
+            else:
+                raise Exception(response)
+
+

@@ -68,7 +68,7 @@ def lambda_handler(event, context):
         return get_runtime_metadata()
     elif (event['config']['lithops']['backend'] == 'aws_lambda_custom'):
         print('CUSTOM FUNCTION')
-        result = lambda_function(event['data_byte_strs']['payload'])
+        result = lambda_function(event['data_byte_strs']['payload'], event['config']['aws_s3']['storage_bucket'])
         return result
 
     if 'get_metadata' in event:

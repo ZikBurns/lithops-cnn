@@ -3,6 +3,7 @@ import time
 import uuid
 from datetime import datetime
 import boto3
+import botocore
 import requests
 from botocore.exceptions import WaiterError, ClientError
 
@@ -105,10 +106,11 @@ class SQSManager:
 
     def send_message(self, queue_url, payload):
         message_deduplication_id = str(uuid.uuid4())
-        object_key = "off-sample-results/"+str(datetime.utcnow())+"/"+message_deduplication_id
+        object_key = "off-sample-results/"+message_deduplication_id
         pre_assigned_url = self.generate_presigned_url(payload["config"]["aws_s3"]["storage_bucket"],object_key,"put_object")
         payload["result_url"]=pre_assigned_url
         message_body=json.dumps(payload)
+        print(payload["body"])
         response = self.sqs_client.send_message(
             QueueUrl=queue_url,
             MessageBody=message_body,
@@ -119,7 +121,7 @@ class SQSManager:
         download_url = self.generate_presigned_url(payload["config"]["aws_s3"]["storage_bucket"],object_key,"get_object")
         print(f"Sent message with ID: {message_id}, results uploaded in: {download_url}")
 
-        self.wait_for_upload(payload["config"]["aws_s3"]["storage_bucket"],object_key)
+        self.wait_for_upload_head(payload["config"]["aws_s3"]["storage_bucket"],object_key)
         response = self.download_contents(payload["config"]["aws_s3"]["storage_bucket"],object_key)
         return response
 
@@ -127,6 +129,20 @@ class SQSManager:
     def wait_for_upload(self, bucket_name, object_key):
         waiter = self.s3_client.get_waiter('object_exists')
         waiter.wait(Bucket=bucket_name, Key=object_key)
+
+    def wait_for_upload_head(self,bucket_name, object_key, poll_interval=1):
+        while True:
+            try:
+                response = self.s3_client.head_object(Bucket=bucket_name, Key=object_key)
+                print("File uploaded successfully")
+                break
+            except botocore.exceptions.ClientError as e:
+                if e.response['Error']['Code'] == '404':
+                    # print("Waiting for file to be uploaded...")
+                    time.sleep(poll_interval)
+                else:
+                    print("An error occurred:", e)
+                    break
 
     def download_file(self, presigned_url):
         response = requests.get(presigned_url)

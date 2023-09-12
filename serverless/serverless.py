@@ -121,3 +121,12 @@ class ServerlessHandler:
 
     def get_func_name(self,runtime_name, memory):
         return self.backend._format_function_name(runtime_name, memory)
+
+    def close(self):
+        return self.backend.close()
+
+    def force_cold(self, job_payload):
+        runtime_name = job_payload['runtime_name']
+        runtime_memory = job_payload['runtime_memory']
+        return self.backend.force_cold(runtime_name, runtime_memory)
+
