@@ -38,19 +38,48 @@ DEFAULT_REQUIREMENTS = [
     'tblib'
 ]
 
-CUSTOM_REQUIREMENTS = [
-    'lithops',
-    'https://download.pytorch.org/whl/cpu/torch-1.13.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
-    'https://download.pytorch.org/whl/cpu/torchvision-0.14.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
-]
-MODEL_FILE = "model.pt"
+CUSTOM_REQUIREMENTS = {
+    '3.6':[
+        'lithops',
+        'https://download.pytorch.org/whl/cpu/torch-1.7.1%2Bcpu-cp36-cp36m-linux_x86_64.whl',
+        'https://download.pytorch.org/whl/cpu/torchvision-0.8.2%2Bcpu-cp36-cp36m-linux_x86_64.whl',
+    ],
+    '3.7':[
+        'lithops',
+        'https://download.pytorch.org/whl/cpu/torch-1.13.1%2Bcpu-cp37-cp37m-linux_x86_64.whl',
+        'https://download.pytorch.org/whl/cpu/torchvision-0.14.1%2Bcpu-cp37-cp37m-linux_x86_64.whl',
+    ],
+    '3.8':[
+        'lithops',
+        'https://download.pytorch.org/whl/cpu/torch-1.13.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
+        'https://download.pytorch.org/whl/cpu/torchvision-0.14.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
+    ],
+    '3.9':[
+        'lithops',
+        'https://download.pytorch.org/whl/cpu/torch-2.0.1%2Bcpu-cp39-cp39-linux_x86_64.whl',
+        'https://download.pytorch.org/whl/cpu/torchvision-0.15.2%2Bcpu-cp39-cp39-linux_x86_64.whl',
+    ],
+    '3.10':[
+        'lithops',
+        'https://download.pytorch.org/whl/cpu/torch-2.0.1%2Bcpu-cp310-cp310-linux_x86_64.whl',
+        'https://download.pytorch.org/whl/cpu/torchvision-0.15.2%2Bcpu-cp310-cp310-linux_x86_64.whl',
+    ],
+    '3.11':[
+        'lithops',
+        'https://download.pytorch.org/whl/cpu/torch-2.0.1%2Bcpu-cp311-cp311-linux_x86_64.whl',
+        'https://download.pytorch.org/whl/cpu/torchvision-0.15.2%2Bcpu-cp311-cp311-linux_x86_64.whl',
+    ]
+}
 
+MODEL_FILE = "model.pt"
 
 AVAILABLE_PY_RUNTIMES = {
     '3.6': 'python3.6',
     '3.7': 'python3.7',
     '3.8': 'python3.8',
-    '3.9': 'python3.9'
+    '3.9': 'python3.9',
+    '3.10': 'python3.10',
+    '3.11': 'python3.11'
 }
 
 USER_RUNTIME_PREFIX = 'lithops.user_runtimes'

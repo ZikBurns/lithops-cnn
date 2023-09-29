@@ -224,12 +224,12 @@ class AWSLambdaBackend:
             build_layer_zip_bin = build_layer_zip.read()
 
         logger.debug('Creating "layer builder" function')
-
+        python_version=config.AVAILABLE_PY_RUNTIMES[utils.CURRENT_PY_VERSION]
         try:
             resp = self.lambda_client.create_function(
                 FunctionName=func_name,
                 Description="aws:states:opt-out",
-                Runtime=config.AVAILABLE_PY_RUNTIMES[utils.CURRENT_PY_VERSION],
+                Runtime=python_version,
                 Role=self.role_arn,
                 Handler='build_layer.lambda_handler',
                 Code={
@@ -255,7 +255,7 @@ class AWSLambdaBackend:
             self._wait_for_function_deployed(func_name)
             logger.debug('OK --> Created "layer builder" function {}'.format(runtime_name))
 
-            dependencies = [dependency.strip().replace(' ', '') for dependency in config.CUSTOM_REQUIREMENTS]
+            dependencies = [dependency.strip().replace(' ', '') for dependency in config.CUSTOM_REQUIREMENTS[utils.CURRENT_PY_VERSION]]
             layer_name = self._format_layer_name(runtime_name)
             payload = {
                 'model_file': config.MODEL_FILE,
