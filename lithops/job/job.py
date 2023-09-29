@@ -493,6 +493,7 @@ def _create_job_cnn_asyncio(
     job.metadata = host_job_meta
 
     return job
+
 def _store_func_and_modules(
     job_tmp_dir,
     func_key,

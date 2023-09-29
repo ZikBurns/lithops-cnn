@@ -14,22 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import asyncio
 import os
 import sys
 import logging
+import time
 import atexit
+import copy
+import asyncio
 import pickle
 import tempfile
-import copy
-import time
-import asyncio
 import subprocess as sp
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Union, Tuple, Dict, Any
 from collections.abc import Callable
 from datetime import datetime
 from lithops.serve.api_gateway import APIGateway
-from concurrent.futures import ThreadPoolExecutor
 from lithops import constants
 from lithops.future import ResponseFuture
 from lithops.invokers import create_invoker
@@ -190,14 +190,14 @@ class FunctionExecutor:
         return '{}{}'.format(call_type, job_id)
 
     def call_async(
-        self,
-        func: Callable,
-        data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
-        extra_env: Optional[Dict] = None,
-        runtime_memory: Optional[int] = None,
-        timeout: Optional[int] = None,
-        include_modules: Optional[List] = [],
-        exclude_modules: Optional[List] = []
+            self,
+            func: Callable,
+            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
+            extra_env: Optional[Dict] = None,
+            runtime_memory: Optional[int] = None,
+            timeout: Optional[int] = None,
+            include_modules: Optional[List] = [],
+            exclude_modules: Optional[List] = []
     ) -> ResponseFuture:
         """
         For running one function execution asynchronously.
@@ -236,19 +236,19 @@ class FunctionExecutor:
         return futures[0]
 
     def map(
-        self,
-        map_function: Callable,
-        map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
-        chunksize: Optional[int] = None,
-        extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
-        extra_env: Optional[Dict[str, str]] = None,
-        runtime_memory: Optional[int] = None,
-        obj_chunk_size: Optional[int] = None,
-        obj_chunk_number: Optional[int] = None,
-        obj_newline: Optional[str] = '\n',
-        timeout: Optional[int] = None,
-        include_modules: Optional[List[str]] = [],
-        exclude_modules: Optional[List[str]] = []
+            self,
+            map_function: Callable,
+            map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
+            chunksize: Optional[int] = None,
+            extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+            extra_env: Optional[Dict[str, str]] = None,
+            runtime_memory: Optional[int] = None,
+            obj_chunk_size: Optional[int] = None,
+            obj_chunk_number: Optional[int] = None,
+            obj_newline: Optional[str] = '\n',
+            timeout: Optional[int] = None,
+            include_modules: Optional[List[str]] = [],
+            exclude_modules: Optional[List[str]] = []
     ) -> FuturesList:
         """
         Spawn multiple function activations based on the items of an input list.
@@ -302,6 +302,7 @@ class FunctionExecutor:
                 fut._produce_output = False
 
         return create_futures_list(futures, self)
+
     def map_cnn_threading(
             self,
             map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
