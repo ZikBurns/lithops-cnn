@@ -195,81 +195,6 @@ import sys
 
 
 # Split-Pipelining
-# def lambda_function(payload, s3_bucket):
-#     predict_resource = PredictResource("/opt/model.pt")
-#     payload = payload["body"]
-#     if isinstance(payload, str):
-#         payload = json.loads(payload)
-#     urls_general=payload["images"]
-#     print(payload)
-#     stream_size_download = payload["download_stream_size"]
-#     stream_size_inference = payload["inference_stream_size"]
-#     arguments = []
-#     for i in range(0, len(urls_general), stream_size_download):
-#         chunk = urls_general[i:i + stream_size_download]
-#         argument = {"images": chunk}
-#         arguments.append(argument)
-#     arguments = [arguments[i:i + stream_size_inference] for i in range(0, len(arguments), stream_size_inference)]
-#     downloaded_images=[]
-
-#     def execute_chunk(images_data):
-#         predictions = predict_resource.predict(images_data)
-#         result = {'predictions': predictions['predictions']}
-#         return result
-
-#     def download_images(argument, count, downloaded_images):
-#         print(f"Thread {count} is starting download.\n")
-#         s3_bucket = "off-sample"
-#         images_data = predict_resource.downloadimages(argument["images"], s3_bucket)
-#         print(f"Thread {count} finished download.\n")
-#         return_value = images_data[0]
-#         downloaded_images.append(return_value)
-
-
-#     start=time.time()
-#     predictions=[]
-
-#     for count_inference, argument in enumerate(arguments, 1):
-#         threads = []
-#         for count_download, image_dict in enumerate(argument):
-#             thread = threading.Thread(target=download_images, args=(image_dict, str(count_inference)+"-"+str(count_download), downloaded_images))
-#             threads.append(thread)
-#             thread.start()
-#         if len(downloaded_images)>=stream_size_inference:
-#             images_data = downloaded_images[:stream_size_inference]
-#             del downloaded_images[:stream_size_inference]
-#             print(f"Inference {count_inference} started\n")
-#             result = execute_chunk(images_data)
-#             predictions.append(result)
-#             print(f"Inference {count_inference} ended\n")
-#         for thread in threads:
-#             thread.join()
-
-
-#     images_data = downloaded_images[:stream_size_inference]
-#     del downloaded_images[:stream_size_inference]
-#     print(f"Inference {count_inference} started\n")
-#     result = execute_chunk(images_data)
-#     predictions.append(result)
-#     print(f"Inference {count_inference} ended\n")
-#     end=time.time()
-
-#     results=[]
-#     for result in predictions:
-#         results.append(result)
-
-#     total_time=end-start
-#     print("Total time:",total_time)
-#     print(sys.getsizeof(results))
-#     print(results)
-#     return {
-#         'statusCode': 200,
-#         'body': results,
-#         'total_time': total_time
-#     }
-
-
-# Experimental Split-Pipelining
 def lambda_function(payload, s3_bucket):
     predict_resource = PredictResource("/opt/model.pt")
     payload = payload["body"]
@@ -284,12 +209,13 @@ def lambda_function(payload, s3_bucket):
         chunk = urls_general[i:i + stream_size_download]
         argument = {"images": chunk}
         arguments.append(argument)
+    arguments = [arguments[i:i + stream_size_inference] for i in range(0, len(arguments), stream_size_inference)]
     downloaded_images = []
 
-    def execute_chunk(images_data, results):
+    def execute_chunk(images_data):
         predictions = predict_resource.predict(images_data)
         result = {'predictions': predictions['predictions']}
-        results.append(result)
+        return result
 
     def download_images(argument, count, downloaded_images):
         print(f"Thread {count} is starting download.\n")
@@ -300,38 +226,31 @@ def lambda_function(payload, s3_bucket):
         downloaded_images.append(return_value)
 
     start = time.time()
-    results = []
+    predictions = []
 
-    threads = []
-    for count_download, image_dict in enumerate(arguments):
-        thread = threading.Thread(target=download_images,
-                                  args=(image_dict, str(count_download) + "-" + str(count_download), downloaded_images))
-        threads.append(thread)
-        thread.start()
-
-    count_inference = 0
-    max_inferences = int(-(-(len(urls_general) / stream_size_inference) // 1))
-    while len(results) != max_inferences - 1:
+    for count_inference, argument in enumerate(arguments, 1):
+        threads = []
+        for count_download, image_dict in enumerate(argument):
+            thread = threading.Thread(target=download_images, args=(
+            image_dict, str(count_inference) + "-" + str(count_download), downloaded_images))
+            threads.append(thread)
+            thread.start()
         if len(downloaded_images) >= stream_size_inference:
             images_data = downloaded_images[:stream_size_inference]
             del downloaded_images[:stream_size_inference]
             print(f"Inference {count_inference} started\n")
-            thread = threading.Thread(target=execute_chunk,
-                                      args=(images_data, results))
-            threads.append(thread)
-            thread.start()
+            result = execute_chunk(images_data)
+            predictions.append(result)
             print(f"Inference {count_inference} ended\n")
-            count_inference = count_inference + 1
-
-    for thread in threads:
-        thread.join()
+        for thread in threads:
+            thread.join()
 
     images_data = downloaded_images[:stream_size_inference]
     del downloaded_images[:stream_size_inference]
     print(f"Inference {count_inference} started\n")
-    execute_chunk(images_data, results)
+    result = execute_chunk(images_data)
+    predictions.append(result)
     print(f"Inference {count_inference} ended\n")
-
     end = time.time()
 
     results = []
@@ -347,3 +266,83 @@ def lambda_function(payload, s3_bucket):
         'body': results,
         'total_time': total_time
     }
+
+
+# Experimental Split-Pipelining
+# def lambda_function(payload, s3_bucket):
+#     predict_resource = PredictResource("/opt/model.pt")
+#     payload = payload["body"]
+#     if isinstance(payload, str):
+#         payload = json.loads(payload)
+#     urls_general = payload["images"]
+#     print(payload)
+#     stream_size_download = payload["download_stream_size"]
+#     stream_size_inference = payload["inference_stream_size"]
+#     arguments = []
+#     for i in range(0, len(urls_general), stream_size_download):
+#         chunk = urls_general[i:i + stream_size_download]
+#         argument = {"images": chunk}
+#         arguments.append(argument)
+#     downloaded_images = []
+
+#     def execute_chunk(images_data, results):
+#         predictions = predict_resource.predict(images_data)
+#         result = {'predictions': predictions['predictions']}
+#         results.append(result)
+
+#     def download_images(argument, count, downloaded_images):
+#         print(f"Thread {count} is starting download.\n")
+#         s3_bucket = "off-sample"
+#         images_data = predict_resource.downloadimages(argument["images"], s3_bucket)
+#         print(f"Thread {count} finished download.\n")
+#         return_value = images_data[0]
+#         downloaded_images.append(return_value)
+
+#     start = time.time()
+#     results = []
+
+#     threads = []
+#     for count_download, image_dict in enumerate(arguments):
+#         thread = threading.Thread(target=download_images,
+#                                   args=(image_dict, str(count_download) + "-" + str(count_download), downloaded_images))
+#         threads.append(thread)
+#         thread.start()
+
+#     count_inference = 0
+#     max_inferences = int(-(-(len(urls_general) / stream_size_inference) // 1))
+#     while len(results) != max_inferences - 1:
+#         if len(downloaded_images) >= stream_size_inference:
+#             images_data = downloaded_images[:stream_size_inference]
+#             del downloaded_images[:stream_size_inference]
+#             print(f"Inference {count_inference} started\n")
+#             thread = threading.Thread(target=execute_chunk,
+#                                       args=(images_data, results))
+#             threads.append(thread)
+#             thread.start()
+#             print(f"Inference {count_inference} ended\n")
+#             count_inference = count_inference + 1
+
+#     for thread in threads:
+#         thread.join()
+
+#     images_data = downloaded_images[:stream_size_inference]
+#     del downloaded_images[:stream_size_inference]
+#     print(f"Inference {count_inference} started\n")
+#     execute_chunk(images_data, results)
+#     print(f"Inference {count_inference} ended\n")
+
+#     end = time.time()
+
+#     results = []
+#     for result in predictions:
+#         results.append(result)
+
+#     total_time = end - start
+#     print("Total time:", total_time)
+#     print(sys.getsizeof(results))
+#     print(results)
+#     return {
+#         'statusCode': 200,
+#         'body': results,
+#         'total_time': total_time
+#     }
