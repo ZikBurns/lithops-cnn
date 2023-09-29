@@ -32,9 +32,12 @@ def install_dependencies(event):
         for dep in event['dependencies']:
             file.write(f"{dep}\n")
 
-    command = [sys.executable, '-m', 'pip', 'install', "-r", "/tmp/requirements.txt", "-t", LAYER_DIR_PATH]
+    command = [sys.executable, '-m', 'pip', 'install', "-r", "/tmp/requirements.txt","-t", LAYER_DIR_PATH]
     subprocess.check_call(command)
 
+    command = [sys.executable, '-m', 'pip', 'install', "torch", "torchvision", '--index-url',
+               'https://download.pytorch.org/whl/cpu', "-t", LAYER_DIR_PATH]
+    subprocess.check_call(command)
 
     # Remove 'tests' directories
     for root, dirs, files in os.walk(LAYER_DIR_PATH, topdown=False):
@@ -66,7 +69,7 @@ def install_dependencies(event):
 
     # Remove other specified packages
     other_packages_to_remove = [
-        'caffe2', 'wheel', 'boto*', 'aws*', 'pip', 'pip-*', 'pipenv',
+        'caffe2', 'wheel', 'boto*', 'aws*', 'pip', 'pip-*', 'pipenv', 'triton', 'cmake',
         'catalogue*', 'bs4*', 'srsly*', 'pydantic*', 'murmurhash*', 'click*', 'wasabi*', 'typer*',
         'smart*', 'preshed*', '[mM]arkup[sS]afe*', 'confection*', 'tzdata*', 'spacy*', 'soupsieve*',
         'setuptools*', 'python-dateutil*', 'pathy*', 'langcodes*', 'jinja2*', 'font[tT]ools*', 'contourpy*',
@@ -127,7 +130,7 @@ def lambda_handler(event, context):
 
             os.remove('/tmp/torch.zip')
 
-            s3.download_file(event['bucket'], event['model_file'], os.path.join(TEMP_PATH, 'modules') + '/'+event['model_file'])
+            s3.download_file(event['bucket'], "model.pt", os.path.join(TEMP_PATH, 'modules') + '/model.pt')
 
             with zipfile.ZipFile(LAYER_ZIP_PATH, 'w') as layer_zip:
                 add_directory_to_zip(layer_zip, os.path.join(TEMP_PATH, 'modules'))

@@ -21,17 +21,15 @@ import logging
 import atexit
 import pickle
 import tempfile
-import subprocess as sp
 import time
 import copy
 import asyncio
-
+import subprocess as sp
 from typing import Optional, List, Union, Tuple, Dict, Any
 from collections.abc import Callable
 from datetime import datetime
-
-from lithops.serve.api_gateway import APIGateway
 from lithops import constants
+from lithops.serve.api_gateway import APIGateway
 from lithops.future import ResponseFuture
 from lithops.invokers import create_invoker
 from lithops.storage import InternalStorage
@@ -50,9 +48,8 @@ from lithops.serverless.serverless import ServerlessHandler
 from lithops.storage.utils import create_job_key, CloudObject
 from lithops.monitor import JobMonitor
 from lithops.utils import FuturesList
-from lithops.version import __version__
 from concurrent.futures import ThreadPoolExecutor
-
+from lithops.version import __version__
 logger = logging.getLogger(__name__)
 CLEANER_PROCESS = None
 
@@ -72,16 +69,16 @@ class FunctionExecutor:
     """
 
     def __init__(
-            self,
-            reset: bool = False,
-            mode: Optional[str] = None,
-            config: Optional[Dict[str, Any]] = None,
-            config_file: Optional[str] = None,
-            backend: Optional[str] = None,
-            storage: Optional[str] = None,
-            monitoring: Optional[str] = None,
-            log_level: Optional[str] = False,
-            **kwargs: Optional[Dict[str, Any]]
+        self,
+        reset: bool = False,
+        mode: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        config_file: Optional[str] = None,
+        backend: Optional[str] = None,
+        storage: Optional[str] = None,
+        monitoring: Optional[str] = None,
+        log_level: Optional[str] = False,
+        **kwargs: Optional[Dict[str, Any]]
     ):
         self.is_lithops_worker = is_lithops_worker()
         self.executor_id = create_executor_id()
@@ -174,6 +171,7 @@ class FunctionExecutor:
 
     def close(self):
         self.compute_handler.close()
+
 
     def clean_runtime(self):
         self.reset = True
@@ -481,6 +479,7 @@ class FunctionExecutor:
             return results[0]
 
         return asyncio.run(general_executor([payload]))
+
 
     def map_reduce(
         self,

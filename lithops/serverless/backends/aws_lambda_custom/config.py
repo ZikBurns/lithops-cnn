@@ -39,9 +39,7 @@ DEFAULT_REQUIREMENTS = [
 ]
 
 CUSTOM_REQUIREMENTS = [
-    'lithops',
-    'https://download.pytorch.org/whl/cpu/torch-1.13.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
-    'https://download.pytorch.org/whl/cpu/torchvision-0.14.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
+    'lithops'
 ]
 MODEL_FILE = "model.pt"
 
@@ -50,13 +48,15 @@ AVAILABLE_PY_RUNTIMES = {
     '3.6': 'python3.6',
     '3.7': 'python3.7',
     '3.8': 'python3.8',
-    '3.9': 'python3.9'
+    '3.9': 'python3.9',
+    '3.10': 'python3.10',
+    '3.11': 'python3.11'
 }
 
 USER_RUNTIME_PREFIX = 'lithops.user_runtimes'
 
 DEFAULT_CONFIG_KEYS = {
-    'runtime_timeout': 180,  # Default: 180 seconds => 3 minutes
+    'runtime_timeout': 360,  # Default: 180 seconds => 3 minutes
     'runtime_memory': 3008,  # Default memory: 256 MB
     'max_workers': 1000,
     'worker_processes': 1,
