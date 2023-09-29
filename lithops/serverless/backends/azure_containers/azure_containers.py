@@ -46,7 +46,7 @@ class AzureContainerAppBackend:
         self.resource_group = ac_config['resource_group']
         self.storage_account_name = ac_config['storage_account_name']
         self.storage_account_key = ac_config['storage_account_key']
-        self.location = ac_config['location']
+        self.location = ac_config['region']
         self.environment = ac_config['environment']
 
         self.queue_service_url = f'https://{self.storage_account_name}.queue.core.windows.net'
@@ -56,7 +56,7 @@ class AzureContainerAppBackend:
         logger.debug(f'Invocation trigger set to: {self.trigger}')
 
         msg = COMPUTE_CLI_MSG.format('Azure Container Apps')
-        logger.info(f"{msg} - Location: {self.location}")
+        logger.info(f"{msg} - Region: {self.location}")
 
     def _format_containerapp_name(self, runtime_name, runtime_memory, version=__version__):
         """
@@ -107,9 +107,9 @@ class AzureContainerAppBackend:
 
     def build_runtime(self, runtime_name, dockerfile, extra_args=[]):
         """
-        Builds a new runtime from a Docker file and pushes it to the Docker hub
+        Builds a new runtime from a Docker file and pushes it to the registry
         """
-        logger.info(f'Building runtime {runtime_name} from {dockerfile}')
+        logger.info(f'Building runtime {runtime_name} from {dockerfile or "Dockerfile"}')
 
         docker_path = utils.get_docker_path()
 
@@ -195,10 +195,22 @@ class AzureContainerAppBackend:
                f'--resource-group {self.resource_group} '
                f'--yaml {config.CA_JSON_LOCATION}')
 
-        try:
-            utils.run_command(cmd)
-        finally:
-            os.remove(config.CA_JSON_LOCATION)
+        logger.debug('Deploying Azure Container App')
+        deployed = False
+        retries = 0
+
+        while retries < 15:
+            try:
+                time.sleep(20)
+                utils.run_command(cmd)
+                os.remove(config.CA_JSON_LOCATION)
+                deployed = True
+                break
+            except Exception:
+                retries += 1
+
+        if not deployed:
+            raise Exception(f"The Azure Container App cannot be deployed: {cmd}")
 
     def delete_runtime(self, runtime_name, memory, version=__version__):
         """
@@ -238,7 +250,7 @@ class AzureContainerAppBackend:
 
         return runtime_key
 
-    def clean(self):
+    def clean(self, **kwargs):
         """
         Deletes all Lithops Azure Function Apps runtimes
         """

@@ -39,33 +39,30 @@ DEFAULT_REQUIREMENTS = [
 ]
 
 CUSTOM_REQUIREMENTS = [
-    'lithops',
-    'six',
-    'aiobotocore',
-    'urllib3==1.26.15',
-    'https://download.pytorch.org/whl/cpu/torch-1.0.1-cp37-cp37m-linux_x86_64.whl',
-    'torchvision==0.2.2',
-    'Pillow==5.4.1'
+    'lithops'
 ]
+MODEL_FILE = "model.pt"
 
 
 AVAILABLE_PY_RUNTIMES = {
     '3.6': 'python3.6',
     '3.7': 'python3.7',
     '3.8': 'python3.8',
-    '3.9': 'python3.9'
+    '3.9': 'python3.9',
+    '3.10': 'python3.10',
+    '3.11': 'python3.11'
 }
 
 USER_RUNTIME_PREFIX = 'lithops.user_runtimes'
 
 DEFAULT_CONFIG_KEYS = {
-    'runtime_timeout': 180,  # Default: 180 seconds => 3 minutes
+    'runtime_timeout': 360,  # Default: 180 seconds => 3 minutes
     'runtime_memory': 3008,  # Default memory: 256 MB
     'max_workers': 1000,
     'worker_processes': 1,
     'invoke_pool_threads': 64,
     'architecture': 'x86_64',
-    'ephemeral_storage': 2048,
+    'ephemeral_storage': 4096,
     'env_vars': {},
     'vpc': {'subnets': [], 'security_groups': []},
     'efs': []

@@ -14,29 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import concurrent
-import json
+import asyncio
 import os
 import sys
-import copy
 import logging
+import time
 import atexit
+import copy
+import asyncio
 import pickle
 import tempfile
 import subprocess as sp
-import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Union, Tuple, Dict, Any
 from collections.abc import Callable
 from datetime import datetime
-import asyncio
-
-import botocore
+from lithops.serve.api_gateway import APIGateway
 from lithops import constants
 from lithops.future import ResponseFuture
 from lithops.invokers import create_invoker
 from lithops.storage import InternalStorage
 from lithops.wait import wait, ALL_COMPLETED, THREADPOOL_SIZE, WAIT_DUR_SEC, ALWAYS
-from lithops.job import create_map_job, create_reduce_job, create_map_job_cnn, create_map_job_cnn_asyncio
+from lithops.job import create_map_job, create_reduce_job, create_map_job_cnn_asyncio
 from lithops.config import default_config, \
     extract_localhost_config, extract_standalone_config, \
     extract_serverless_config, get_log_info, extract_storage_config
@@ -50,14 +49,10 @@ from lithops.serverless.serverless import ServerlessHandler
 from lithops.storage.utils import create_job_key, CloudObject
 from lithops.monitor import JobMonitor
 from lithops.utils import FuturesList
-from lithops.serve.api_gateway import APIGateway
-from requests import post, get
-from lithops.serve.sqs import SQSManager
+from lithops.version import __version__
 
 logger = logging.getLogger(__name__)
 CLEANER_PROCESS = None
-from concurrent.futures import ThreadPoolExecutor
-from lithops.version import __version__
 
 
 class FunctionExecutor:
@@ -66,15 +61,12 @@ class FunctionExecutor:
 
     :param mode: Execution mode. One of: localhost, serverless or standalone
     :param config: Settings passed in here will override those in lithops_config
+    :param config_file: Path to the lithops config file
     :param backend: Compute backend to run the functions
     :param storage: Storage backend to store Lithops data
-    :param runtime: Name of the runtime to run the functions
-    :param runtime_memory: Memory (in MB) to use to run the functions
     :param monitoring: Monitoring system implementation. One of: storage, rabbitmq
-    :param max_workers: Max number of parallel workers
-    :param worker_processes: Worker granularity, number of concurrent/parallel processes in each worker
-    :param remote_invoker: Spawn a function that will perform the actual job invocation (True/False)
     :param log_level: Log level printing (INFO, DEBUG, ...). Set it to None to hide all logs. If this is param is set, all logging params in config are disabled
+    :param kwargs: Any parameter that can be set in the compute backend section of the config file, can be set here
     """
 
     def __init__(
@@ -82,15 +74,12 @@ class FunctionExecutor:
             reset: bool = False,
             mode: Optional[str] = None,
             config: Optional[Dict[str, Any]] = None,
+            config_file: Optional[str] = None,
             backend: Optional[str] = None,
             storage: Optional[str] = None,
-            runtime: Optional[str] = None,
-            runtime_memory: Optional[int] = None,
             monitoring: Optional[str] = None,
-            max_workers: Optional[int] = None,
-            worker_processes: Optional[int] = None,
-            remote_invoker: Optional[bool] = None,
-            log_level: Optional[str] = False
+            log_level: Optional[str] = False,
+            **kwargs: Optional[Dict[str, Any]]
     ):
         self.is_lithops_worker = is_lithops_worker()
         self.executor_id = create_executor_id()
@@ -106,32 +95,20 @@ class FunctionExecutor:
                 setup_lithops_logger(log_level)
             elif log_level is False and logger.getEffectiveLevel() == logging.WARNING:
                 # Set default logging from config
-                setup_lithops_logger(*get_log_info(config))
+                setup_lithops_logger(*get_log_info(config_file=config_file, config_data=config))
 
         # overwrite user-provided parameters
         config_ow = {'lithops': {}, 'backend': {}}
-        if runtime is not None:
-            config_ow['backend']['runtime'] = runtime
-        if runtime_memory is not None:
-            config_ow['backend']['runtime_memory'] = int(runtime_memory)
-        if remote_invoker is not None:
-            config_ow['backend']['remote_invoker'] = remote_invoker
-        if worker_processes is not None:
-            config_ow['backend']['worker_processes'] = worker_processes
-        if max_workers is not None:
-            config_ow['backend']['max_workers'] = max_workers
-
-        if mode is not None:
-            config_ow['lithops']['mode'] = mode
-        if backend is not None:
-            config_ow['lithops']['backend'] = backend
-        if storage is not None:
-            config_ow['lithops']['storage'] = storage
-        if monitoring is not None:
-            config_ow['lithops']['monitoring'] = monitoring
+        for key, value in kwargs.items():
+            if value is not None:
+                config_ow['backend'][key] = value
+        args = {'mode': mode, 'backend': backend, 'storage': storage, 'monitoring': monitoring}
+        for key, value in args.items():
+            if value is not None:
+                config_ow['lithops'][key] = value
 
         # Load configuration
-        self.config = default_config(copy.deepcopy(config), config_ow)
+        self.config = default_config(config_file=config_file, config_data=config, config_overwrite=config_ow)
 
         self.data_cleaner = self.config['lithops'].get('data_cleaner', True)
         if self.data_cleaner and not self.is_lithops_worker:
@@ -150,7 +127,6 @@ class FunctionExecutor:
         elif self.mode == SERVERLESS:
             serverless_config = extract_serverless_config(self.config)
             self.compute_handler = ServerlessHandler(serverless_config, self.internal_storage)
-            self.aws_config = serverless_config[serverless_config['backend']]
         elif self.mode == STANDALONE:
             standalone_config = extract_standalone_config(self.config)
             self.compute_handler = StandaloneHandler(standalone_config)
@@ -172,6 +148,7 @@ class FunctionExecutor:
         )
 
         logger.debug(f'Function executor for {self.backend} created with ID: {self.executor_id}')
+
         self.runtime_meta = None
         self.log_path = None
         self.reset = reset
@@ -196,11 +173,6 @@ class FunctionExecutor:
     def close(self):
         self.compute_handler.close()
 
-    def _create_job_id(self, call_type):
-        job_id = str(self.total_jobs).zfill(3)
-        self.total_jobs += 1
-        return '{}{}'.format(call_type, job_id)
-
     def clean_runtime(self):
         self.reset = True
         runtime_key = self.compute_handler.get_runtime_key(self.invoker.runtime_name,
@@ -211,6 +183,11 @@ class FunctionExecutor:
         if ("api_gateway" in self.config):
             api_gateway = APIGateway(self.config)
             api_gateway.delete_api_gateway()
+
+    def _create_job_id(self, call_type):
+        job_id = str(self.total_jobs).zfill(3)
+        self.total_jobs += 1
+        return '{}{}'.format(call_type, job_id)
 
     def call_async(
             self,
@@ -257,237 +234,6 @@ class FunctionExecutor:
         self.futures.extend(futures)
 
         return futures[0]
-
-    def call_async_cnn(
-            self,
-            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
-            extra_env: Optional[Dict] = None,
-            runtime_memory: Optional[int] = None,
-            timeout: Optional[int] = None,
-            include_modules: Optional[List] = [],
-            exclude_modules: Optional[List] = []
-    ) -> ResponseFuture:
-        """
-        For running one function execution asynchronously.
-
-        :param func: The function to map over the data.
-        :param data: Input data. Arguments can be passed as a list or tuple, or as a dictionary for keyword arguments.
-        :param extra_env: Additional env variables for function environment.
-        :param runtime_memory: Memory to use to run the function.
-        :param timeout: Time that the function has to complete its execution before raising a timeout.
-        :param include_modules: Explicitly pickle these dependencies.
-        :param exclude_modules: Explicitly keep these modules from pickled dependencies.
-
-        :return: Response future.
-        """
-        job_id = self._create_job_id('A')
-        self.last_call = 'call_async'
-
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-
-        job = create_map_job_cnn(config=self.config,
-                                 internal_storage=self.internal_storage,
-                                 executor_id=self.executor_id,
-                                 job_id=job_id,
-                                 iterdata=[data],
-                                 runtime_meta=runtime_meta,
-                                 runtime_memory=runtime_memory,
-                                 extra_env=extra_env,
-                                 include_modules=include_modules,
-                                 exclude_modules=exclude_modules,
-                                 execution_timeout=timeout)
-
-        futures = self.invoker.run_job(job)
-        self.futures.extend(futures)
-
-        return futures[0]
-
-    async def call_async_cnn_asyncio(
-            self,
-            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
-            extra_env: Optional[Dict] = None,
-            runtime_memory: Optional[int] = None,
-            timeout: Optional[int] = None,
-            include_modules: Optional[List] = [],
-            exclude_modules: Optional[List] = []
-    ):
-        job_id = self._create_job_id('A')
-        self.last_call = 'call_async'
-
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-
-        job = create_map_job_cnn(config=self.config,
-                                 internal_storage=self.internal_storage,
-                                 executor_id=self.executor_id,
-                                 job_id=job_id,
-                                 iterdata=[data],
-                                 runtime_meta=runtime_meta,
-                                 runtime_memory=runtime_memory,
-                                 extra_env=extra_env,
-                                 include_modules=include_modules,
-                                 exclude_modules=exclude_modules,
-                                 execution_timeout=timeout)
-        payload = self.invoker._create_payload(job)
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=20,
-        )
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(executor, lambda: self.compute_handler.invoke(payload))
-        return result
-
-    def call_async_cnn_asyncio_orchestrator(
-            self,
-            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
-            force_cold: bool = False,
-            extra_env: Optional[Dict] = None,
-            runtime_memory: Optional[int] = None,
-            timeout: Optional[int] = None,
-            include_modules: Optional[List] = [],
-            exclude_modules: Optional[List] = []
-    ):
-        job_id = self._create_job_id('A')
-        self.last_call = 'call_async'
-
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-
-        job = create_map_job_cnn_asyncio(config=self.config,
-                                         internal_storage=self.internal_storage,
-                                         executor_id=self.executor_id,
-                                         job_id=job_id,
-                                         iterdata=[data],
-                                         runtime_meta=runtime_meta,
-                                         runtime_memory=runtime_memory,
-                                         extra_env=extra_env,
-                                         include_modules=include_modules,
-                                         exclude_modules=exclude_modules,
-                                         execution_timeout=timeout)
-        job.func_key = "custom"
-        job.runtime_name = self.invoker.runtime_name
-        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
-        payload = self.invoker._create_payload(job)
-        payload["body"] = data
-        payload["reset"] = self.reset
-        payload["force_cold"] = force_cold
-        # with open('payload.txt', 'w') as file:
-        #     file.write(json.dumps(payload, indent=4))
-        async def general_executor(payload):
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                results = list(executor.map(self.compute_handler.invoke, payload))
-            return results[0]
-
-        return asyncio.run(general_executor([payload]))
-
-    def call_async_cnn_apigateway(
-            self,
-            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
-            extra_env: Optional[Dict] = None,
-            runtime_memory: Optional[int] = None,
-            timeout: Optional[int] = None,
-            include_modules: Optional[List] = [],
-            exclude_modules: Optional[List] = []
-    ):
-        job_id = self._create_job_id('A')
-        self.last_call = 'call_async'
-
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-        if ("api_gateway" in self.config):
-            func_name = self.compute_handler.get_func_name(self.invoker.runtime_name,
-                                                           self.invoker.runtime_info["runtime_memory"])
-            api_gateway = APIGateway(self.config)
-            api_url = api_gateway.get_api_gateway_url()
-            if not api_url:
-                api_gateway.delete_api_gateway()
-                api_url = api_gateway.create_api_gateway(func_name)
-
-        job = create_map_job_cnn_asyncio(config=self.config,
-                                         internal_storage=self.internal_storage,
-                                         executor_id=self.executor_id,
-                                         job_id=job_id,
-                                         iterdata=[data],
-                                         runtime_meta=runtime_meta,
-                                         runtime_memory=runtime_memory,
-                                         extra_env=extra_env,
-                                         include_modules=include_modules,
-                                         exclude_modules=exclude_modules,
-                                         execution_timeout=timeout)
-        job.func_key = "custom"
-        job.runtime_name = self.invoker.runtime_name
-        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
-        payload = self.invoker._create_payload(job)
-        payload["body"] = data
-        payload["reset"] = self.reset
-
-        def call_api_test(doc=None):
-            if doc:
-                resp = post(url=api_url + "/off-sample/predict", json=doc, timeout=120)
-            # else:
-            #     resp = get(url=self.api_endpoint + url)
-            if resp.status_code == 200:
-                print("HOLA")
-                return resp.json()
-            else:
-                print("EXCEPTION")
-                raise Exception(resp.content.decode())
-
-        async def general_executor(payload):
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                results = list(executor.map(call_api_test, payload))
-            return results
-
-        return asyncio.run(general_executor([payload]))
-
-    def call_async_cnn_sqs(
-            self,
-            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
-            extra_env: Optional[Dict] = None,
-            runtime_memory: Optional[int] = None,
-            timeout: Optional[int] = None,
-            include_modules: Optional[List] = [],
-            exclude_modules: Optional[List] = []
-    ):
-        job_id = self._create_job_id('A')
-        self.last_call = 'call_async'
-
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-        func_name = self.compute_handler.get_func_name(self.invoker.runtime_name,
-                                                       self.invoker.runtime_info["runtime_memory"])
-        sqs_name = "off-sample-lithops.fifo"
-        sqs_manager = SQSManager(self.config)
-        if sqs_manager.queue_exists(sqs_name):
-            sqs_url = sqs_manager.get_queue_url(sqs_name)
-        if not sqs_manager.queue_exists(sqs_name):
-            # sqs_manager.delete_queue(sqs_name)
-            sqs_url = sqs_manager.create_queue(sqs_name)
-            sqs_manager.delete_trigger(sqs_name, func_name)
-            sqs_manager.configure_trigger(sqs_url, func_name)
-
-        job = create_map_job_cnn_asyncio(config=self.config,
-                                         internal_storage=self.internal_storage,
-                                         executor_id=self.executor_id,
-                                         job_id=job_id,
-                                         iterdata=[data],
-                                         runtime_meta=runtime_meta,
-                                         runtime_memory=runtime_memory,
-                                         extra_env=extra_env,
-                                         include_modules=include_modules,
-                                         exclude_modules=exclude_modules,
-                                         execution_timeout=timeout)
-        job.func_key = "custom"
-        job.runtime_name = self.invoker.runtime_name
-        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
-        payload = self.invoker._create_payload(job)
-        payload["body"] = data
-        payload["reset"] = self.reset
-
-        def enqueue(payload):
-            sqs_manager.send_message(queue_url=sqs_url, payload=payload)
-
-        async def general_executor(payload):
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                results = list(executor.map(enqueue, payload))
-            return results
-
-        return asyncio.run(general_executor([payload]))
 
     def map(
             self,
@@ -556,191 +302,6 @@ class FunctionExecutor:
                 fut._produce_output = False
 
         return create_futures_list(futures, self)
-
-    def map_cnn(
-            self,
-            map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
-            chunksize: Optional[int] = None,
-            extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
-            extra_env: Optional[Dict[str, str]] = None,
-            runtime_memory: Optional[int] = None,
-            obj_chunk_size: Optional[int] = None,
-            obj_chunk_number: Optional[int] = None,
-            obj_newline: Optional[str] = '\n',
-            timeout: Optional[int] = None,
-            include_modules: Optional[List[str]] = [],
-            exclude_modules: Optional[List[str]] = []
-    ) -> FuturesList:
-        """
-        Spawn multiple function activations based on the items of an input list.
-
-        :param map_function: The function to map over the data
-        :param map_iterdata: An iterable of input data (e.g python list).
-        :param chunksize: Split map_iteradata in chunks of this size. Lithops spawns 1 worker per resulting chunk
-        :param extra_args: Additional arguments to pass to each map_function activation
-        :param extra_env: Additional environment variables for function environment
-        :param runtime_memory: Memory (in MB) to use to run the functions
-        :param obj_chunk_size: Used for data processing. Chunk size to split each object in bytes. Must be >= 1MiB. 'None' for processing the whole file in one function activation
-        :param obj_chunk_number: Used for data processing. Number of chunks to split each object. 'None' for processing the whole file in one function activation. chunk_n has prevalence over chunk_size if both parameters are set
-        :param obj_newline: new line character for keeping line integrity of partitions. 'None' for disabling line integrity logic and get partitions of the exact same size in the functions
-        :param timeout: Max time per function activation (seconds)
-        :param include_modules: Explicitly pickle these dependencies. All required dependencies are pickled if default empty list. No one dependency is pickled if it is explicitly set to None
-        :param exclude_modules: Explicitly keep these modules from pickled dependencies. It is not taken into account if you set include_modules.
-
-        :return: A list with size `len(map_iterdata)` of futures for each job (Futures are also internally stored by Lithops).
-        """
-
-        job_id = self._create_job_id('M')
-        self.last_call = 'map'
-        start = time.time()
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-        end = time.time()
-        print("select runtime", end - start)
-        job = create_map_job_cnn(
-            config=self.config,
-            internal_storage=self.internal_storage,
-            executor_id=self.executor_id,
-            job_id=job_id,
-            iterdata=map_iterdata,
-            chunksize=chunksize,
-            runtime_meta=runtime_meta,
-            runtime_memory=runtime_memory,
-            extra_env=extra_env,
-            include_modules=include_modules,
-            exclude_modules=exclude_modules,
-            execution_timeout=timeout,
-            extra_args=extra_args,
-            obj_chunk_size=obj_chunk_size,
-            obj_chunk_number=obj_chunk_number,
-            obj_newline=obj_newline
-        )
-
-        futures = self.invoker.run_job(job)
-        self.futures.extend(futures)
-
-        if isinstance(map_iterdata, FuturesList):
-            for fut in map_iterdata:
-                fut._produce_output = False
-
-        return create_futures_list(futures, self)
-
-    async def map_cnn_asyncio(
-            self,
-            map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
-            chunksize: Optional[int] = None,
-            extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
-            extra_env: Optional[Dict[str, str]] = None,
-            runtime_memory: Optional[int] = None,
-            obj_chunk_size: Optional[int] = None,
-            obj_chunk_number: Optional[int] = None,
-            obj_newline: Optional[str] = '\n',
-            timeout: Optional[int] = None,
-            include_modules: Optional[List[str]] = [],
-            exclude_modules: Optional[List[str]] = []
-    ):
-        start = time.time()
-        job_id = self._create_job_id('M')
-        self.last_call = 'map'
-
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-
-        job = create_map_job_cnn_asyncio(
-            config=self.config,
-            internal_storage=self.internal_storage,
-            executor_id=self.executor_id,
-            job_id=job_id,
-            iterdata=map_iterdata,
-            chunksize=chunksize,
-            runtime_meta=runtime_meta,
-            runtime_memory=runtime_memory,
-            extra_env=extra_env,
-            include_modules=include_modules,
-            exclude_modules=exclude_modules,
-            execution_timeout=timeout,
-            extra_args=extra_args,
-            obj_chunk_size=obj_chunk_size,
-            obj_chunk_number=obj_chunk_number,
-            obj_newline=obj_newline
-        )
-        payload_default = self.invoker._create_payload(job)
-        payloads = []
-        for data_byte in payload_default['data_byte_strs']:
-            tmp_payload = copy.deepcopy(payload_default)
-            tmp_payload['data_byte_strs'] = [data_byte]
-            payloads.append(tmp_payload)
-
-        tasks = []
-        for payload in payloads:
-            task = asyncio.get_event_loop().run_in_executor(
-                None, self.compute_handler.invoke, payload
-            )
-            tasks.append(task)
-        end = time.time()
-        # print("Preparations:", (end-start))
-        results = await asyncio.gather(*tasks)
-        return results
-
-    async def map_cnn_asyncio_alt(
-            self,
-            map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
-            chunksize: Optional[int] = None,
-            extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
-            extra_env: Optional[Dict[str, str]] = None,
-            runtime_memory: Optional[int] = None,
-            obj_chunk_size: Optional[int] = None,
-            obj_chunk_number: Optional[int] = None,
-            obj_newline: Optional[str] = '\n',
-            timeout: Optional[int] = None,
-            include_modules: Optional[List[str]] = [],
-            exclude_modules: Optional[List[str]] = []
-    ):
-        start = time.time()
-        job_id = self._create_job_id('M')
-        self.last_call = 'map'
-
-        runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-
-        job = create_map_job_cnn_asyncio(
-            config=self.config,
-            internal_storage=self.internal_storage,
-            executor_id=self.executor_id,
-            job_id=job_id,
-            iterdata=map_iterdata,
-            chunksize=chunksize,
-            runtime_meta=runtime_meta,
-            runtime_memory=runtime_memory,
-            extra_env=extra_env,
-            include_modules=include_modules,
-            exclude_modules=exclude_modules,
-            execution_timeout=timeout,
-            extra_args=extra_args,
-            obj_chunk_size=obj_chunk_size,
-            obj_chunk_number=obj_chunk_number,
-            obj_newline=obj_newline
-        )
-        payload_default = self.invoker._create_payload(job)
-        payloads = []
-        for payload in map_iterdata:
-            tmp_payload = copy.deepcopy(payload_default)
-            tmp_payload['data_byte_strs'] = payload
-            payloads.append(tmp_payload)
-
-        tasks = []
-        for payload in payloads:
-            task = asyncio.get_event_loop().run_in_executor(
-                None, time.sleep, 1
-                # None, self.compute_handler.invoke, payload
-            )
-            tasks.append(task)
-        end = time.time()
-        # print("Preparations:", (end-start))
-        results = await asyncio.gather(*tasks)
-        return results
-
-    def select_runtime(self, runtime_memory: Optional[int] = None):
-        job_id = self._create_job_id('M')
-        self.last_call = 'map'
-        self.runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
 
     def map_cnn_threading(
             self,
@@ -852,15 +413,15 @@ class FunctionExecutor:
             tmp_payload['data_byte_strs'] = payload
             payloads.append(tmp_payload)
         starttimes = []
-        endtimes= []
+        endtimes = []
 
         if force_cold:
             self.compute_handler.force_cold(payload_default)
 
         def invokator(payload):
-            start=time.time()
+            start = time.time()
             result = self.compute_handler.invoke(payload)
-            end=time.time()
+            end = time.time()
             starttimes.append(start)
             endtimes.append(end)
             return result
@@ -876,96 +437,68 @@ class FunctionExecutor:
         }
         return general_executor(payloads), time_dict
 
-
-    def map_cnn_sqs(
+    def call_async_cnn_asyncio_orchestrator(
             self,
-            map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
-            chunksize: Optional[int] = None,
-            extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
-            extra_env: Optional[Dict[str, str]] = None,
+            data: Union[List[Any], Tuple[Any, ...], Dict[str, Any]],
+            force_cold: bool = False,
+            extra_env: Optional[Dict] = None,
             runtime_memory: Optional[int] = None,
-            obj_chunk_size: Optional[int] = None,
-            obj_chunk_number: Optional[int] = None,
-            obj_newline: Optional[str] = '\n',
             timeout: Optional[int] = None,
-            include_modules: Optional[List[str]] = [],
-            exclude_modules: Optional[List[str]] = []
+            include_modules: Optional[List] = [],
+            exclude_modules: Optional[List] = []
     ):
-        job_id = self._create_job_id('M')
-        self.last_call = 'map'
+        job_id = self._create_job_id('A')
+        self.last_call = 'call_async'
 
         runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
-        func_name = self.compute_handler.get_func_name(self.invoker.runtime_name,
-                                                       self.invoker.runtime_info["runtime_memory"])
-        sqs_name = "off-sample-lithops.fifo"
-        sqs_manager = SQSManager(self.config)
-        if sqs_manager.queue_exists(sqs_name):
-            sqs_url = sqs_manager.get_queue_url(sqs_name)
-        if not sqs_manager.queue_exists(sqs_name):
-            # sqs_manager.delete_queue(sqs_name)
-            sqs_url = sqs_manager.create_queue(sqs_name)
-            sqs_manager.delete_trigger(sqs_name, func_name)
-            sqs_manager.configure_trigger(sqs_url, func_name)
 
-        job = create_map_job_cnn_asyncio(
-            config=self.config,
-            internal_storage=self.internal_storage,
-            executor_id=self.executor_id,
-            job_id=job_id,
-            iterdata=map_iterdata,
-            chunksize=chunksize,
-            runtime_meta=runtime_meta,
-            runtime_memory=runtime_memory,
-            extra_env=extra_env,
-            include_modules=include_modules,
-            exclude_modules=exclude_modules,
-            execution_timeout=timeout,
-            extra_args=extra_args,
-            obj_chunk_size=obj_chunk_size,
-            obj_chunk_number=obj_chunk_number,
-            obj_newline=obj_newline
-        )
+        job = create_map_job_cnn_asyncio(config=self.config,
+                                         internal_storage=self.internal_storage,
+                                         executor_id=self.executor_id,
+                                         job_id=job_id,
+                                         iterdata=[data],
+                                         runtime_meta=runtime_meta,
+                                         runtime_memory=runtime_memory,
+                                         extra_env=extra_env,
+                                         include_modules=include_modules,
+                                         exclude_modules=exclude_modules,
+                                         execution_timeout=timeout)
         job.func_key = "custom"
         job.runtime_name = self.invoker.runtime_name
         job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
-        payload_default = self.invoker._create_payload(job)
-        payloads = []
-        for payload in map_iterdata:
-            tmp_payload = copy.deepcopy(payload_default)
-            tmp_payload['body'] = payload
-            tmp_payload["reset"] = self.reset
-            payloads.append(tmp_payload)
+        payload = self.invoker._create_payload(job)
+        payload["body"] = data
+        payload["reset"] = self.reset
+        payload["force_cold"] = force_cold
 
-        def enqueue(payload):
-            results = sqs_manager.send_message(queue_url=sqs_url, payload=payload)
-            return results
+        # with open('payload.txt', 'w') as file:
+        #     file.write(json.dumps(payload, indent=4))
+        async def general_executor(payload):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                results = list(executor.map(self.compute_handler.invoke, payload))
+            return results[0]
 
-        async def general_executor(payloads):
-            with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
-                results = list(executor.map(enqueue, payloads))
-            return results
-
-        return asyncio.run(general_executor(payloads))
+        return asyncio.run(general_executor([payload]))
 
     def map_reduce(
-            self,
-            map_function: Callable,
-            map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
-            reduce_function: Callable,
-            chunksize: Optional[int] = None,
-            extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
-            extra_args_reduce: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
-            extra_env: Optional[Dict[str, str]] = None,
-            map_runtime_memory: Optional[int] = None,
-            reduce_runtime_memory: Optional[int] = None,
-            timeout: Optional[int] = None,
-            obj_chunk_size: Optional[int] = None,
-            obj_chunk_number: Optional[int] = None,
-            obj_newline: Optional[str] = '\n',
-            obj_reduce_by_key: Optional[bool] = False,
-            spawn_reducer: Optional[int] = 20,
-            include_modules: Optional[List[str]] = [],
-            exclude_modules: Optional[List[str]] = []
+        self,
+        map_function: Callable,
+        map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
+        reduce_function: Callable,
+        chunksize: Optional[int] = None,
+        extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+        extra_args_reduce: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+        extra_env: Optional[Dict[str, str]] = None,
+        map_runtime_memory: Optional[int] = None,
+        reduce_runtime_memory: Optional[int] = None,
+        timeout: Optional[int] = None,
+        obj_chunk_size: Optional[int] = None,
+        obj_chunk_number: Optional[int] = None,
+        obj_newline: Optional[str] = '\n',
+        obj_reduce_by_key: Optional[bool] = False,
+        spawn_reducer: Optional[int] = 20,
+        include_modules: Optional[List[str]] = [],
+        exclude_modules: Optional[List[str]] = []
     ) -> FuturesList:
         """
         Map the map_function over the data and apply the reduce_function across all futures.
@@ -1057,15 +590,15 @@ class FunctionExecutor:
         return create_futures_list(map_futures + reduce_futures, self)
 
     def wait(
-            self,
-            fs: Optional[Union[ResponseFuture, FuturesList, List[ResponseFuture]]] = None,
-            throw_except: Optional[bool] = True,
-            return_when: Optional[Any] = ALL_COMPLETED,
-            download_results: Optional[bool] = False,
-            timeout: Optional[int] = None,
-            threadpool_size: Optional[int] = THREADPOOL_SIZE,
-            wait_dur_sec: Optional[int] = WAIT_DUR_SEC,
-            show_progressbar: Optional[bool] = True
+        self,
+        fs: Optional[Union[ResponseFuture, FuturesList, List[ResponseFuture]]] = None,
+        throw_except: Optional[bool] = True,
+        return_when: Optional[Any] = ALL_COMPLETED,
+        download_results: Optional[bool] = False,
+        timeout: Optional[int] = None,
+        threadpool_size: Optional[int] = THREADPOOL_SIZE,
+        wait_dur_sec: Optional[int] = WAIT_DUR_SEC,
+        show_progressbar: Optional[bool] = True
     ) -> Tuple[FuturesList, FuturesList]:
         """
         Wait for the Future instances (possibly created by different Executor instances)
@@ -1129,13 +662,13 @@ class FunctionExecutor:
         return create_futures_list(fs_done, self), create_futures_list(fs_notdone, self)
 
     def get_result(
-            self,
-            fs: Optional[Union[ResponseFuture, FuturesList, List[ResponseFuture]]] = None,
-            throw_except: Optional[bool] = True,
-            timeout: Optional[int] = None,
-            threadpool_size: Optional[int] = THREADPOOL_SIZE,
-            wait_dur_sec: Optional[int] = WAIT_DUR_SEC,
-            show_progressbar: Optional[bool] = True
+        self,
+        fs: Optional[Union[ResponseFuture, FuturesList, List[ResponseFuture]]] = None,
+        throw_except: Optional[bool] = True,
+        timeout: Optional[int] = None,
+        threadpool_size: Optional[int] = THREADPOOL_SIZE,
+        wait_dur_sec: Optional[int] = WAIT_DUR_SEC,
+        show_progressbar: Optional[bool] = True
     ):
         """
         For getting the results from all function activations
@@ -1180,9 +713,9 @@ class FunctionExecutor:
         return result
 
     def plot(
-            self,
-            fs: Optional[Union[ResponseFuture, List[ResponseFuture], FuturesList]] = None,
-            dst: Optional[str] = None
+        self,
+        fs: Optional[Union[ResponseFuture, List[ResponseFuture], FuturesList]] = None,
+        dst: Optional[str] = None
     ):
         """
         Creates timeline and histogram of the current execution in dst_dir.
@@ -1210,12 +743,12 @@ class FunctionExecutor:
         create_histogram(ftrs_to_plot, dst)
 
     def clean(
-            self,
-            fs: Optional[Union[ResponseFuture, List[ResponseFuture]]] = None,
-            cs: Optional[List[CloudObject]] = None,
-            clean_cloudobjects: Optional[bool] = True,
-            clean_fn: Optional[bool] = False,
-            force: Optional[bool] = False
+        self,
+        fs: Optional[Union[ResponseFuture, List[ResponseFuture]]] = None,
+        cs: Optional[List[CloudObject]] = None,
+        clean_cloudobjects: Optional[bool] = True,
+        clean_fn: Optional[bool] = False,
+        force: Optional[bool] = False
     ):
         """
         Deletes all the temp files from storage. These files include the function,
@@ -1360,30 +893,28 @@ class LocalhostExecutor(FunctionExecutor):
     Initialize a LocalhostExecutor class.
 
     :param config: Settings passed in here will override those in config file.
-    :param runtime: Runtime name to use.
+    :param config_file: Path to the lithops config file
     :param storage: Name of the storage backend to use.
-    :param worker_processes: Worker granularity, number of concurrent/parallel processes in each worker
     :param monitoring: monitoring system.
     :param log_level: log level to use during the execution.
+    :param kwargs: Any parameter that can be set in the compute backend section of the config file, can be set here
     """
 
     def __init__(
-            self,
-            config: Optional[Dict[str, Any]] = None,
-            runtime: Optional[int] = None,
-            storage: Optional[str] = None,
-            worker_processes: Optional[int] = None,
-            monitoring: Optional[str] = None,
-            log_level: Optional[str] = False
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        config_file: Optional[str] = None,
+        storage: Optional[str] = None,
+        monitoring: Optional[str] = None,
+        log_level: Optional[str] = False
     ):
         super().__init__(
             backend=LOCALHOST,
             config=config,
-            runtime=runtime,
+            config_file=config_file,
             storage=storage or LOCALHOST,
             log_level=log_level,
             monitoring=monitoring,
-            worker_processes=worker_processes
         )
 
 
@@ -1392,42 +923,33 @@ class ServerlessExecutor(FunctionExecutor):
     Initialize a ServerlessExecutor class.
 
     :param config: Settings passed in here will override those in config file
-    :param runtime: Runtime name to use
-    :param runtime_memory: memory to use in the runtime
+    :param config_file: Path to the lithops config file
     :param backend: Name of the serverless compute backend to use
     :param storage: Name of the storage backend to use
-    :param max_workers: Max number of concurrent workers
-    :param worker_processes: Worker granularity, number of concurrent/parallel processes in each worker
     :param monitoring: monitoring system
-    :param remote_invoker: Spawn a function that will perform the actual job invocation (True/False)
     :param log_level: log level to use during the execution
+    :param kwargs: Any parameter that can be set in the compute backend section of the config file, can be set here
     """
 
     def __init__(
-            self,
-            config: Optional[Dict[str, Any]] = None,
-            runtime: Optional[str] = None,
-            runtime_memory: Optional[int] = None,
-            backend: Optional[str] = None,
-            storage: Optional[str] = None,
-            max_workers: Optional[int] = None,
-            worker_processes: Optional[int] = None,
-            monitoring: Optional[str] = None,
-            remote_invoker: Optional[bool] = None,
-            log_level: Optional[str] = False
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        config_file: Optional[str] = None,
+        backend: Optional[str] = None,
+        storage: Optional[str] = None,
+        monitoring: Optional[str] = None,
+        log_level: Optional[str] = False,
+        **kwargs: Optional[Dict[str, Any]]
     ):
         super().__init__(
             config=config,
+            config_file=config_file,
             mode='serverless',
-            runtime=runtime,
-            runtime_memory=runtime_memory,
             backend=backend,
             storage=storage,
-            max_workers=max_workers,
-            worker_processes=worker_processes,
             monitoring=monitoring,
             log_level=log_level,
-            remote_invoker=remote_invoker
+            kwargs=kwargs
         )
 
 
@@ -1436,34 +958,30 @@ class StandaloneExecutor(FunctionExecutor):
     Initialize a StandaloneExecutor class.
 
     :param config: Settings passed in here will override those in config file
-    :param runtime: Runtime name to use
+    :param config_file: Path to the lithops config file
     :param backend: Name of the standalone compute backend to use
     :param storage: Name of the storage backend to use
-    :param max_workers: Max number of concurrent workers
-    :param worker_processes: Worker granularity, number of concurrent/parallel processes in each worker
     :param monitoring: monitoring system
     :param log_level: log level to use during the execution
     """
 
     def __init__(
-            self,
-            config: Optional[Dict[str, Any]] = None,
-            runtime: Optional[str] = None,
-            backend: Optional[str] = None,
-            storage: Optional[str] = None,
-            max_workers: Optional[int] = None,
-            worker_processes: Optional[int] = None,
-            monitoring: Optional[str] = None,
-            log_level: Optional[str] = False
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        config_file: Optional[str] = None,
+        backend: Optional[str] = None,
+        storage: Optional[str] = None,
+        monitoring: Optional[str] = None,
+        log_level: Optional[str] = False,
+        **kwargs: Optional[Dict[str, Any]]
     ):
         super().__init__(
             config=config,
+            config_file=config_file,
             mode='standalone',
-            runtime=runtime,
             backend=backend,
             storage=storage,
-            max_workers=max_workers,
-            worker_processes=worker_processes,
             monitoring=monitoring,
-            log_level=log_level
+            log_level=log_level,
+            kwargs=kwargs,
         )

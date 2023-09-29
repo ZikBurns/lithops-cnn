@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import copy
 import os
 
 AVAILABLE_PY_RUNTIMES = {
@@ -21,7 +22,8 @@ AVAILABLE_PY_RUNTIMES = {
     '3.7': 'docker.io/lithopscloud/ibmcf-python-v37',
     '3.8': 'docker.io/lithopscloud/ibmcf-python-v38',
     '3.9': 'docker.io/lithopscloud/ibmcf-python-v39',
-    '3.10': 'docker.io/lithopscloud/ibmcf-python-v310'
+    '3.10': 'docker.io/lithopscloud/ibmcf-python-v310',
+    '3.11': 'docker.io/lithopscloud/ibmcf-python-v311'
 }
 
 DEFAULT_CONFIG_KEYS = {
@@ -36,29 +38,32 @@ DEFAULT_CONFIG_KEYS = {
 UNIT_PRICE = 0.000017
 
 FH_ZIP_LOCATION = os.path.join(os.getcwd(), 'lithops_ibmcf.zip')
+CF_ENDPOINT = "https://{}.functions.cloud.ibm.com"
+REGIONS = ["jp-tok", "au-syd", "eu-gb", "eu-de", "us-south", "us-east"]
 
-REQ_PARAMS = ['endpoint', 'namespace']
-OPT_PARAMS_1 = ['api_key']
-OPT_PARAMS_2 = ['namespace_id', 'iam_api_key']
+REQ_PARAMS = ('iam_api_key',)
 
 
 def load_config(config_data):
 
-    if not config_data['ibm_cf']:
-        raise Exception("'ibm_cf' section is mandatory in the configuration")
+    if 'ibm' not in config_data or config_data['ibm'] is None:
+        raise Exception("'ibm' section is mandatory in the configuration")
 
     for param in REQ_PARAMS:
-        if param not in config_data['ibm_cf']:
-            msg = f"{param} is mandatory in 'ibm_cf' section of the configuration"
+        if param not in config_data['ibm']:
+            msg = f'"{param}" is mandatory in the "ibm" section of the configuration'
             raise Exception(msg)
 
-    if 'ibm' in config_data and config_data['ibm'] is not None:
-        config_data['ibm_cf'].update(config_data['ibm'])
+    if not config_data['ibm_cf']:
+        config_data['ibm_cf'] = {}
 
-    if not all(elem in config_data['ibm_cf'] for elem in OPT_PARAMS_1) and \
-       not all(elem in config_data['ibm_cf'] for elem in OPT_PARAMS_2):
-        raise Exception('You must provide either {}, or {} in {} section of the configuration'
-                        .format(OPT_PARAMS_1, OPT_PARAMS_2, 'ibm_cf'))
+    temp = copy.deepcopy(config_data['ibm_cf'])
+    config_data['ibm_cf'].update(config_data['ibm'])
+    config_data['ibm_cf'].update(temp)
+
+    if "region" not in config_data['ibm_cf'] and "endpoint" not in config_data['ibm_cf']:
+        msg = "'region' or 'endpoint' parameter is mandatory under 'ibm_cf' section of the configuration"
+        raise Exception(msg)
 
     for key in DEFAULT_CONFIG_KEYS:
         if key not in config_data['ibm_cf']:
@@ -69,3 +74,17 @@ def load_config(config_data):
         registry = config_data['ibm_cf']['docker_server']
         if runtime.count('/') == 1 and registry not in runtime:
             config_data['ibm_cf']['runtime'] = f'{registry}/{runtime}'
+
+    if 'endpoint' in config_data['ibm_cf']:
+        endpoint = config_data['ibm_cf']['endpoint']
+        config_data['ibm_cf']['region'] = endpoint.split('//')[1].split('.')[0]
+
+    elif "region" in config_data['ibm_cf']:
+        region = config_data['ibm_cf']['region']
+        if region not in REGIONS:
+            msg = f"'region' conig parameter under 'ibm_cf' section must be one of {REGIONS}"
+            raise Exception(msg)
+        config_data['ibm_cf']['endpoint'] = CF_ENDPOINT.format(region)
+
+    if 'region' not in config_data['ibm']:
+        config_data['ibm']['region'] = config_data['ibm_cf']['region']

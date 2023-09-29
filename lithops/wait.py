@@ -89,7 +89,8 @@ def wait(fs: Union[ResponseFuture, FuturesList, List[ResponseFuture]],
 
     else:
         fs_to_wait = math.ceil(return_when * len(fs) / 100)
-        msg = (f'ExecutorID {fs[0].executor_id} - Waiting for {return_when}% of '
+        msg_text = 'any' if return_when == ANY_COMPLETED else f'{return_when}%'
+        msg = (f'ExecutorID {fs[0].executor_id} - Waiting for {msg_text} of '
                f'{len(fs)} function activations to complete')
         fs_done = [f for f in fs if f.success or f.done]
         fs_not_done = [f for f in fs if not (f.success or f.done)]
@@ -109,11 +110,11 @@ def wait(fs: Union[ResponseFuture, FuturesList, List[ResponseFuture]],
     pbar = None
     if not is_lithops_worker() and logger.getEffectiveLevel() == logging.INFO \
        and show_progressbar:
-        from tqdm import tqdm
+        from tqdm.auto import tqdm
         if not is_notebook():
             print()
         pbar = tqdm(bar_format='  {l_bar}{bar}| {n_fmt}/{total_fmt}  ',
-                    total=fs_to_wait, disable=False)
+                    total=fs_to_wait, disable=None)
         pbar.update(min(len(fs_done), fs_to_wait))
 
     try:

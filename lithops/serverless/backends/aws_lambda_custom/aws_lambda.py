@@ -238,7 +238,7 @@ class AWSLambdaBackend:
                 Timeout=180,
                 MemorySize=3008,
                 EphemeralStorage={
-                    'Size': 2048
+                    'Size': 4096
                 }
             )
 
@@ -247,12 +247,18 @@ class AWSLambdaBackend:
                 msg = 'An error occurred creating/updating action {}: {}'.format(runtime_name, resp)
                 raise Exception(msg)
 
+            s3_client = self.aws_session.client(
+                's3', region_name=self.region_name)
+
+            s3_client.upload_file(config.MODEL_FILE, self.internal_storage.bucket, config.MODEL_FILE)
+
             self._wait_for_function_deployed(func_name)
             logger.debug('OK --> Created "layer builder" function {}'.format(runtime_name))
 
             dependencies = [dependency.strip().replace(' ', '') for dependency in config.CUSTOM_REQUIREMENTS]
             layer_name = self._format_layer_name(runtime_name)
             payload = {
+                'model_file': config.MODEL_FILE,
                 'dependencies': dependencies,
                 'bucket': self.internal_storage.bucket,
                 'key': layer_name
@@ -288,6 +294,7 @@ class AWSLambdaBackend:
 
         try:
             self.internal_storage.storage.delete_object(self.internal_storage.bucket, layer_name)
+            self.internal_storage.storage.delete_object(self.internal_storage.bucket, config.MODEL_FILE)
         except Exception as e:
             logger.warning(e)
 

@@ -58,7 +58,6 @@ class ServerlessHandler:
 
         return self.backend.invoke(runtime_name, runtime_memory, job_payload)
 
-
     def build_runtime(self, runtime_name, file, extra_args=[]):
         """
         Wrapper method to build a new runtime for the compute backend.
@@ -83,7 +82,7 @@ class ServerlessHandler:
         """
         Wrapper method to clean the compute backend
         """
-        self.backend.clean()
+        self.backend.clean(**kwargs)
 
     def clear(self, job_keys=None):
         """
@@ -119,9 +118,6 @@ class ServerlessHandler:
         """
         return self.backend.type
 
-    def get_func_name(self,runtime_name, memory):
-        return self.backend._format_function_name(runtime_name, memory)
-
     def close(self):
         return self.backend.close()
 
@@ -129,4 +125,3 @@ class ServerlessHandler:
         runtime_name = job_payload['runtime_name']
         runtime_memory = job_payload['runtime_memory']
         return self.backend.force_cold(runtime_name, runtime_memory)
-

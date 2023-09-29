@@ -266,10 +266,10 @@ class GCPFunctionsBackend:
                 raise Exception(f"Unknown status {response['status']}")
 
     def build_runtime(self, runtime_name, requirements_file, extra_args=[]):
-        logger.info(f'Building runtime {runtime_name} from {requirements_file}')
-
         if not requirements_file:
             raise Exception('Please provide a "requirements.txt" file with the necessary modules')
+
+        logger.info(f'Building runtime {runtime_name} from {requirements_file}')
 
         entry_point = os.path.join(os.path.dirname(__file__), 'entry_point.py')
         runtime_path = config.FH_ZIP_LOCATION.format(runtime_name)
@@ -323,7 +323,7 @@ class GCPFunctionsBackend:
         self._api_resource.projects().locations().functions().delete(
             name=function_location,
         ).execute(num_retries=self.num_retries)
-        logger.debug('Request Ok - Waiting until function is completely deleted')
+        logger.debug('Request Ok - Waiting until the function is completely deleted')
 
         self._wait_function_deleted(function_location)
 
@@ -348,7 +348,7 @@ class GCPFunctionsBackend:
             self.internal_storage.storage.delete_object(
                 self.internal_storage.bucket, bin_location)
 
-    def clean(self):
+    def clean(self, **kwargs):
         logger.debug('Going to delete all deployed runtimes')
         runtimes = self.list_runtimes()
         for runtime_name, runtime_memory, version in runtimes:

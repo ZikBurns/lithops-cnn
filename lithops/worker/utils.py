@@ -22,11 +22,13 @@ import pickle
 import platform
 import subprocess
 from contextlib import contextmanager
+
 from lithops.version import __version__ as lithops_ver
 from lithops.utils import sizeof_fmt, is_unix_system, b64str_to_bytes
 from lithops.constants import LITHOPS_TEMP_DIR, MODULES_DIR
 
 logger = logging.getLogger(__name__)
+
 
 if is_unix_system():
     from resource import RUSAGE_SELF, getrusage
@@ -77,6 +79,8 @@ def get_function_and_modules(job, internal_storage):
                 fid.write(b64str_to_bytes(m_data))
 
     return loaded_func_all['func']
+
+
 def get_function_data(job, internal_storage):
     """
     Get function data (iteradata) from storage
@@ -205,7 +209,7 @@ def memory_monitor_worker(mm_conn, delay=0.01):
     logger.debug("Starting memory monitor")
 
     def make_measurement(peak):
-        mem = get_memory_usage(formatted=False) + 5 * 1024 ** 2
+        mem = get_memory_usage(formatted=False) + 5 * 1024**2
         if mem > peak:
             peak = mem
         return peak

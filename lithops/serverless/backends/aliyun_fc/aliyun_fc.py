@@ -41,14 +41,14 @@ class AliyunFunctionComputeBackend:
         logger.debug("Creating Aliyun Function Compute client")
         self.name = 'aliyun_fc'
         self.type = 'faas'
-        self.afc_config = afc_config
+        self.config = afc_config
         self.user_agent = afc_config['user_agent']
 
         self.endpoint = afc_config['public_endpoint']
         self.access_key_id = afc_config['access_key_id']
         self.access_key_secret = afc_config['access_key_secret']
         self.role_arn = afc_config['role_arn']
-        self.region = self.endpoint.split('.')[1]
+        self.region = afc_config['region']
 
         self.default_service_name = f'{config.SERVICE_NAME}_{self.access_key_id[0:4].lower()}'
         self.service_name = afc_config.get('service', self.default_service_name)
@@ -81,6 +81,9 @@ class AliyunFunctionComputeBackend:
         return f'default-runtime-v{py_version}'
 
     def build_runtime(self, runtime_name, requirements_file, extra_args=[]):
+        if not requirements_file:
+            raise Exception('Please provide a "requirements.txt" file with the necessary modules')
+
         logger.info(f'Building runtime {runtime_name} from {requirements_file}')
 
         build_dir = os.path.join(config.BUILD_DIR, runtime_name)
@@ -202,7 +205,7 @@ class AliyunFunctionComputeBackend:
         function_name = self._format_function_name(runtime_name, memory, version)
         self.fc_client.delete_function(self.service_name, function_name)
 
-    def clean(self):
+    def clean(self, **kwargs):
         """"
         Deletes all runtimes from the current service
         """
@@ -305,14 +308,14 @@ class AliyunFunctionComputeBackend:
                 f'Functions. Please use one of {list(config.AVAILABLE_PY_RUNTIMES.keys())}'
             )
 
-        if 'runtime' not in self.afc_config or self.afc_config['runtime'] == 'default':
-            self.afc_config['runtime'] = self._get_default_runtime_name()
+        if 'runtime' not in self.config or self.config['runtime'] == 'default':
+            self.config['runtime'] = self._get_default_runtime_name()
 
         runtime_info = {
-            'runtime_name': self.afc_config['runtime'],
-            'runtime_memory': self.afc_config['runtime_memory'],
-            'runtime_timeout': self.afc_config['runtime_timeout'],
-            'max_workers': self.afc_config['max_workers'],
+            'runtime_name': self.config['runtime'],
+            'runtime_memory': self.config['runtime_memory'],
+            'runtime_timeout': self.config['runtime_timeout'],
+            'max_workers': self.config['max_workers'],
         }
 
         return runtime_info

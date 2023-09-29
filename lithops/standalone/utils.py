@@ -76,8 +76,9 @@ def get_host_setup_script(docker=True):
     """
     Returns the script necessary for installing a lithops VM host
     """
+    script = f"""#!/bin/bash
+    mkdir -p {SA_TMP_DIR};
 
-    return """
     wait_internet_connection(){{
     echo "--> Checking internet connection"
     while ! (ping -c 1 -W 1 8.8.8.8| grep -q 'statistics'); do
@@ -87,7 +88,7 @@ def get_host_setup_script(docker=True):
     }}
 
     install_packages(){{
-    export DOCKER_REQUIRED={2};
+    export DOCKER_REQUIRED={str(docker).lower()};
     command -v docker >/dev/null 2>&1 || {{ export INSTALL_DOCKER=true; export INSTALL_LITHOPS_DEPS=true;}};
     command -v unzip >/dev/null 2>&1 || {{ export INSTALL_LITHOPS_DEPS=true; }};
     command -v pip3 >/dev/null 2>&1 || {{ export INSTALL_LITHOPS_DEPS=true; }};
@@ -117,18 +118,24 @@ def get_host_setup_script(docker=True):
     if [[ ! $(pip3 list|grep "lithops") ]]; then
     wait_internet_connection;
     echo "--> Installing Lithops python dependencies"
-    pip3 install -U flask gevent lithops boto3;
+    pip3 install -U flask gevent lithops[all];
     fi;
     }}
-    install_packages >> {1} 2>&1
+    install_packages >> {SA_LOG_FILE} 2>&1
 
-    unzip -o /tmp/lithops_standalone.zip -d {0} > /dev/null 2>&1;
+    unzip -o /tmp/lithops_standalone.zip -d {SA_INSTALL_DIR} > /dev/null 2>&1;
     rm /tmp/lithops_standalone.zip
-    """.format(SA_INSTALL_DIR, SA_LOG_FILE, str(docker).lower())
+    """
+
+    return script
 
 def docker_login(config):
-    if all(k in config for k in ("docker_server", "docker_user", "docker_password")):
-        return f"""docker login -u {config['docker_user']} -p {config['docker_password']} {config['docker_server']} >> /tmp/kuku 2>&1
+    backend = config['backend']
+    if all(k in config[backend] for k in ("docker_server", "docker_user", "docker_password")):
+        user = config[backend]['docker_user']
+        passwd = config[backend]['docker_password']
+        server = config[backend]['docker_server']
+        return f"""docker login -u {user} -p {passwd} {server} >> /tmp/kuku 2>&1
     """
     return ""
 
@@ -192,7 +199,6 @@ def get_worker_setup_script(config, vm_data):
     script = f"""#!/bin/bash
     rm -R {SA_INSTALL_DIR};
     mkdir -p {SA_INSTALL_DIR};
-    mkdir -p {SA_TMP_DIR};
     """
     script += get_host_setup_script()
 

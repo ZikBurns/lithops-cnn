@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import copy
 import os
 
 DEFAULT_CONFIG_KEYS = {
@@ -35,6 +36,10 @@ VALID_MEMORY_VALUES = [256, 512, 1024, 2048, 4096, 8192, 12288, 16384, 24576, 32
 VALID_REGIONS = ['us-south', 'us-east', 'ca-tor', 'eu-de', 'eu-gb', 'jp-osa', 'jp-tok', 'br-sao', 'au-syd']
 
 CLUSTER_URL = 'https://proxy.{}.codeengine.cloud.ibm.com'
+BASE_URL_V1 = 'https://api.{}.codeengine.cloud.ibm.com/api/v1'
+BASE_URL_V2 = 'https://api.{}.codeengine.cloud.ibm.com/v2'
+
+REQ_PARAMS = ('iam_api_key',)
 
 DOCKERFILE_DEFAULT = """
 RUN apt-get update && apt-get install -y \
@@ -48,6 +53,8 @@ RUN pip install --upgrade --ignore-installed setuptools six pip \
         flask \
         gevent \
         ibm-cos-sdk \
+        ibm-vpc \
+        ibm-code-engine-sdk \
         redis \
         requests \
         PyYAML \
@@ -142,8 +149,29 @@ spec:
 
 def load_config(config_data):
 
-    if 'ibm' in config_data and config_data['ibm'] is not None:
-        config_data['code_engine'].update(config_data['ibm'])
+    if 'ibm' not in config_data or config_data['ibm'] is None:
+        raise Exception("'ibm' section is mandatory in the configuration")
+
+    for param in REQ_PARAMS:
+        if param not in config_data['ibm']:
+            msg = f'"{param}" is mandatory in the "ibm" section of the configuration'
+            raise Exception(msg)
+
+    if not config_data['code_engine']:
+        config_data['code_engine'] = {}
+
+    temp = copy.deepcopy(config_data['code_engine'])
+    config_data['code_engine'].update(config_data['ibm'])
+    config_data['code_engine'].update(temp)
+
+    if 'region' not in config_data['code_engine']:
+        msg = "'region' parameter is mandatory under the 'ibm' or 'code_engine' section of the configuration"
+        raise Exception(msg)
+
+    region = config_data['code_engine']['region']
+    if region not in VALID_REGIONS:
+        raise Exception('{} is an invalid region name. Set one of: '
+                        '{}'.format(region, VALID_REGIONS))
 
     for key in DEFAULT_CONFIG_KEYS:
         if key not in config_data['code_engine']:
@@ -159,13 +187,11 @@ def load_config(config_data):
         raise Exception('{} is an invalid runtime memory value in MB. Set one of: '
                         '{}'.format(runtime_memory, VALID_MEMORY_VALUES))
 
-    region = config_data['code_engine'].get('region')
-    if region and region not in VALID_REGIONS:
-        raise Exception('{} is an invalid region name. Set one of: '
-                        '{}'.format(region, VALID_REGIONS))
-
     if 'runtime' in config_data['code_engine']:
         runtime = config_data['code_engine']['runtime']
         registry = config_data['code_engine']['docker_server']
         if runtime.count('/') == 1 and registry not in runtime:
             config_data['code_engine']['runtime'] = f'{registry}/{runtime}'
+
+    if region and 'region' not in config_data['ibm']:
+        config_data['ibm']['region'] = config_data['code_engine']['region']

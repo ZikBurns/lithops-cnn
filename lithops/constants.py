@@ -50,19 +50,23 @@ EXECUTION_TIMEOUT_LOCALHOST_DEFAULT = 3600
 
 LOCALHOST_RUNTIME_DEFAULT = os.path.basename(sys.executable)
 
-SA_RUNTIME = LOCALHOST_RUNTIME_DEFAULT
-SA_EXEC_MODE = 'consume'
-SA_START_TIMEOUT = 300
-SA_PULL_RUNTIME = False
-SA_AUTO_DISMANTLE = True
-SA_SOFT_DISMANTLE_TIMEOUT = 300
-SA_HARD_DISMANTLE_TIMEOUT = 3600
 SA_INSTALL_DIR = '/opt/lithops'
 SA_TMP_DIR = '/tmp/lithops-root'
 SA_LOG_FILE = f'{SA_TMP_DIR}/service.log'
 SA_SERVICE_PORT = 8080
 SA_CONFIG_FILE = os.path.join(SA_INSTALL_DIR, 'config')
 SA_DATA_FILE = os.path.join(SA_INSTALL_DIR, 'access.data')
+SA_IMAGE_NAME_DEFAULT = 'lithops-worker-default'
+
+SA_DEFAULT_CONFIG_KEYS = {
+    'runtime': 'python3',
+    'exec_mode': 'consume',
+    'start_timeout': 300,
+    'pull_runtime': False,
+    'auto_dismantle': True,
+    'soft_dismantle_timeout': 300,
+    'hard_dismantle_timeout': 3600
+}
 
 MAX_AGG_DATA_SIZE = 4  # 4MiB
 
@@ -97,7 +101,6 @@ SERVERLESS_BACKENDS = [
     'aws_lambda',
     'aws_lambda_custom',
     'aws_lambda_custom_orchestrator',
-    'aws_lambda_default',
     'aws_batch',
     'gcp_cloudrun',
     'gcp_functions',
@@ -111,6 +114,7 @@ SERVERLESS_BACKENDS = [
 STANDALONE_BACKENDS = [
     'ibm_vpc',
     'aws_ec2',
+    'azure_vms',
     'vm'
 ]
 
@@ -119,9 +123,6 @@ FAAS_BACKENDS = [
     'knative',
     'openwhisk',
     'aws_lambda',
-    'aws_lambda_custom',
-    'aws_lambda_custom_orchestrator',
-    'aws_lambda_default',
     'gcp_cloudrun',
     'gcp_functions',
     'cloudrun',
@@ -133,6 +134,7 @@ FAAS_BACKENDS = [
 BATCH_BACKENDS = [
     'ibm_vpc',
     'aws_ec2',
+    'azure_vms',
     'aws_batch',
     'k8s',
     'code_engine'
