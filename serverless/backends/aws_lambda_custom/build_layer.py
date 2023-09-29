@@ -121,7 +121,7 @@ def lambda_handler(event, context):
                 s3.put_object(Body=torch_zip, Bucket=event['bucket'], Key='torch.zip')
 
             if os.path.isdir(torch_path):
-                shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH, 'torch')
+                # shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH, 'torch')
                 shutil.rmtree(torch_path)
 
 

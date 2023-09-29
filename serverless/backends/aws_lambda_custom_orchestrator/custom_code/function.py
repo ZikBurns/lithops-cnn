@@ -101,6 +101,64 @@ def lambda_function_benchmark_batch(event):
     }
 
 
+def lambda_function_benchmark_batch_streaming(event):
+    payload = event["body"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+
+    payload_list = []
+    chunk_size = payload['chunk_size']
+    stream_size = payload['stream_size']
+    grouped = [payload['images'][i:i + chunk_size] for i in range(0, len(payload['images']), chunk_size)]
+
+    for chunk in grouped:
+        payload_list.append({'payload': {'body': {'images': chunk, 'stream_size': stream_size}}})
+    lithops_config = event["config"].copy()
+    lithops_config["lithops"]["backend"] = "aws_lambda_custom"
+    fexec = FunctionExecutor(reset=event["reset"], config=lithops_config, runtime_memory=3008)
+    start = time()
+    force_cold = event["force_cold"]
+    result, invocation_times = fexec.map_cnn_threading_benchmark(payload_list, force_cold=force_cold)
+    end = time()
+    print(result)
+    fexec.close()
+    return {
+        'statusCode': 200,
+        'body': json.dumps(result),
+        'invocation_times': invocation_times
+    }
+
+
+def lambda_function_benchmark_batch_split_streaming(event):
+    payload = event["body"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+
+    payload_list = []
+    chunk_size = payload['chunk_size']
+    download_stream_size = payload['download_stream_size']
+    inference_stream_size = payload['inference_stream_size']
+    grouped = [payload['images'][i:i + chunk_size] for i in range(0, len(payload['images']), chunk_size)]
+
+    for chunk in grouped:
+        payload_list.append({'payload': {'body': {'images': chunk, 'download_stream_size': download_stream_size,
+                                                  "inference_stream_size": inference_stream_size}}})
+    lithops_config = event["config"].copy()
+    lithops_config["lithops"]["backend"] = "aws_lambda_custom"
+    fexec = FunctionExecutor(reset=event["reset"], config=lithops_config, runtime_memory=3008)
+    start = time()
+    force_cold = event["force_cold"]
+    result, invocation_times = fexec.map_cnn_threading_benchmark(payload_list, force_cold=force_cold)
+    end = time()
+    print(result)
+    fexec.close()
+    return {
+        'statusCode': 200,
+        'body': json.dumps(result),
+        'invocation_times': invocation_times
+    }
+
+
 def upload_list_to_s3(my_list, upload_url):
     # Convert the list to JSON
     json_data = json.dumps(my_list)
