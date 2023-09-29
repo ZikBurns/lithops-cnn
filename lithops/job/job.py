@@ -99,7 +99,6 @@ def create_map_job(
 
     return job
 
-
 def create_map_job_cnn_asyncio(
     config,
     internal_storage,
@@ -365,7 +364,6 @@ def _create_job(
     return job
 
 
-
 def _create_job_cnn_asyncio(
     config,
     internal_storage,
@@ -495,8 +493,6 @@ def _create_job_cnn_asyncio(
     job.metadata = host_job_meta
 
     return job
-
-
 def _store_func_and_modules(
     job_tmp_dir,
     func_key,

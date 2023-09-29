@@ -21,15 +21,16 @@ import logging
 import atexit
 import pickle
 import tempfile
-import time
 import copy
+import time
 import asyncio
 import subprocess as sp
 from typing import Optional, List, Union, Tuple, Dict, Any
 from collections.abc import Callable
 from datetime import datetime
-from lithops import constants
 from lithops.serve.api_gateway import APIGateway
+from concurrent.futures import ThreadPoolExecutor
+from lithops import constants
 from lithops.future import ResponseFuture
 from lithops.invokers import create_invoker
 from lithops.storage import InternalStorage
@@ -48,8 +49,8 @@ from lithops.serverless.serverless import ServerlessHandler
 from lithops.storage.utils import create_job_key, CloudObject
 from lithops.monitor import JobMonitor
 from lithops.utils import FuturesList
-from concurrent.futures import ThreadPoolExecutor
 from lithops.version import __version__
+
 logger = logging.getLogger(__name__)
 CLEANER_PROCESS = None
 
@@ -69,16 +70,16 @@ class FunctionExecutor:
     """
 
     def __init__(
-        self,
-        reset: bool = False,
-        mode: Optional[str] = None,
-        config: Optional[Dict[str, Any]] = None,
-        config_file: Optional[str] = None,
-        backend: Optional[str] = None,
-        storage: Optional[str] = None,
-        monitoring: Optional[str] = None,
-        log_level: Optional[str] = False,
-        **kwargs: Optional[Dict[str, Any]]
+            self,
+            reset: bool = False,
+            mode: Optional[str] = None,
+            config: Optional[Dict[str, Any]] = None,
+            config_file: Optional[str] = None,
+            backend: Optional[str] = None,
+            storage: Optional[str] = None,
+            monitoring: Optional[str] = None,
+            log_level: Optional[str] = False,
+            **kwargs: Optional[Dict[str, Any]]
     ):
         self.is_lithops_worker = is_lithops_worker()
         self.executor_id = create_executor_id()
@@ -171,7 +172,6 @@ class FunctionExecutor:
 
     def close(self):
         self.compute_handler.close()
-
 
     def clean_runtime(self):
         self.reset = True
@@ -302,8 +302,6 @@ class FunctionExecutor:
                 fut._produce_output = False
 
         return create_futures_list(futures, self)
-
-
     def map_cnn_threading(
             self,
             map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
@@ -363,6 +361,7 @@ class FunctionExecutor:
             return results
 
         return general_executor(payloads)
+
     def map_cnn_threading_benchmark(
             self,
             map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
@@ -413,15 +412,15 @@ class FunctionExecutor:
             tmp_payload['data_byte_strs'] = payload
             payloads.append(tmp_payload)
         starttimes = []
-        endtimes= []
+        endtimes = []
 
         if force_cold:
             self.compute_handler.force_cold(payload_default)
 
         def invokator(payload):
-            start=time.time()
+            start = time.time()
             result = self.compute_handler.invoke(payload)
-            end=time.time()
+            end = time.time()
             starttimes.append(start)
             endtimes.append(end)
             return result
@@ -436,7 +435,6 @@ class FunctionExecutor:
             "end": endtimes
         }
         return general_executor(payloads), time_dict
-
 
     def call_async_cnn_asyncio_orchestrator(
             self,
@@ -471,6 +469,7 @@ class FunctionExecutor:
         payload["body"] = data
         payload["reset"] = self.reset
         payload["force_cold"] = force_cold
+
         # with open('payload.txt', 'w') as file:
         #     file.write(json.dumps(payload, indent=4))
         async def general_executor(payload):
@@ -479,7 +478,6 @@ class FunctionExecutor:
             return results[0]
 
         return asyncio.run(general_executor([payload]))
-
 
     def map_reduce(
         self,

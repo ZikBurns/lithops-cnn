@@ -118,6 +118,7 @@ class ServerlessHandler:
         """
         return self.backend.type
 
+
     def close(self):
         return self.backend.close()
 
