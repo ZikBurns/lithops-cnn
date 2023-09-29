@@ -96,9 +96,9 @@ class KubernetesBackend:
 
     def build_runtime(self, docker_image_name, dockerfile, extra_args=[]):
         """
-        Builds a new runtime from a Docker file and pushes it to the Docker hub
+        Builds a new runtime from a Docker file and pushes it to the registry
         """
-        logger.info(f'Building runtime {docker_image_name} from {dockerfile}')
+        logger.info(f'Building runtime {docker_image_name} from {dockerfile or "Dockerfile"}')
 
         docker_path = utils.get_docker_path()
 
@@ -209,7 +209,7 @@ class KubernetesBackend:
         """
         pass
 
-    def clean(self, force=True):
+    def clean(self, all=False, **kwargs):
         """
         Deletes all jobs
         """
@@ -219,7 +219,7 @@ class KubernetesBackend:
             jobs = self.batch_api.list_namespaced_job(namespace=self.namespace)
             for job in jobs.items:
                 if job.metadata.labels['type'] == 'lithops-runtime'\
-                   and (job.status.completion_time is not None or force):
+                   and (job.status.completion_time is not None or all):
                     job_name = job.metadata.name
                     logger.debug(f'Deleting job {job_name}')
                     try:

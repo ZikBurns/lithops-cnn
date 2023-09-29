@@ -206,11 +206,14 @@ class GCPCloudRunBackend:
             raise Exception(res.text)
 
     def build_runtime(self, runtime_name, dockerfile, extra_args=[]):
-        logger.info(f'Building runtime {runtime_name} from {dockerfile}')
-
-        image_name = self._format_image_name(runtime_name)
+        """
+        Builds a new runtime from a Docker file and pushes it to the registry
+        """
+        logger.info(f'Building runtime {runtime_name} from {dockerfile or "Dockerfile"}')
 
         docker_path = utils.get_docker_path()
+
+        image_name = self._format_image_name(runtime_name)
 
         if dockerfile:
             assert os.path.isfile(dockerfile), f'Cannot locate "{dockerfile}"'
@@ -336,7 +339,7 @@ class GCPCloudRunBackend:
         except Exception:
             logger.debug(f'Error -- unable to delete service {service_name}')
 
-    def clean(self):
+    def clean(self, **kwargs):
         logger.debug('Going to delete all deployed runtimes')
 
         res = self._api_resource.namespaces().services().list(

@@ -51,7 +51,7 @@ class Storage:
         if storage_config:
             self.config = storage_config
         else:
-            storage_config = default_storage_config(config, backend)
+            storage_config = default_storage_config(config_data=config, backend=backend)
             self.config = extract_storage_config(storage_config)
 
         self.backend = self.config['backend']
@@ -84,6 +84,15 @@ class Storage:
         :return: Storage configuration
         """
         return self.config
+
+    def create_bucket(self, bucket: str):
+        """
+        Creates a bucket if not exists.
+
+        :param bucket: Name of the bucket
+        """
+        if hasattr(self.storage_handler, 'create_bucket'):
+            return self.storage_handler.create_bucket(bucket)
 
     def put_object(self, bucket: str, key: str, body: Union[str, bytes, TextIO, BinaryIO]):
         """
@@ -297,6 +306,8 @@ class InternalStorage:
         if not self.bucket:
             raise Exception(f"'storage_bucket' is mandatory under '{self.backend}'"
                             " section of the configuration")
+
+        self.storage.create_bucket(self.bucket)
 
     def get_client(self):
         """

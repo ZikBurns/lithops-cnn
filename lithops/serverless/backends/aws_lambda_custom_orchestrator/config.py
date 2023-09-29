@@ -40,8 +40,6 @@ DEFAULT_REQUIREMENTS = [
 
 CUSTOM_REQUIREMENTS = [
     'lithops',
-    'six',
-    'urllib3==1.26.15',
     'aiobotocore'
 ]
 

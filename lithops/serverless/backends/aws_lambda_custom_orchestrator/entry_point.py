@@ -28,7 +28,7 @@ from lithops.worker import function_handler
 from lithops.worker import function_invoker
 from lithops.worker.utils import get_runtime_metadata
 from lithops.serverless.backends.aws_lambda_custom_orchestrator.custom_code.function import lambda_function, \
-    lambda_function_sqs, lambda_function_sqs_serial, lambda_function_benchmark_batch_split_streaming
+    lambda_function_sqs, lambda_function_benchmark_batch_split_streaming
 
 logger = logging.getLogger('lithops.worker')
 

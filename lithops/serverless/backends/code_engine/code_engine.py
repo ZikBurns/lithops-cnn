@@ -24,14 +24,16 @@ import logging
 import urllib3
 import copy
 import yaml
+import shutil
 from kubernetes import client, watch
-from kubernetes.config import load_kube_config, load_incluster_config, list_kube_config_contexts
+from kubernetes.config import load_incluster_config
 from kubernetes.client.rest import ApiException
 
 from lithops import utils
+from lithops.config import dump_yaml_config, load_yaml_config
 from lithops.version import __version__
-from lithops.constants import COMPUTE_CLI_MSG, JOBS_PREFIX
-from lithops.util.ibm_token_manager import IBMTokenManager
+from lithops.constants import CACHE_DIR, COMPUTE_CLI_MSG, JOBS_PREFIX
+from lithops.util.ibm_token_manager import IAMTokenManager
 
 from . import config
 
@@ -43,7 +45,7 @@ logger = logging.getLogger(__name__)
 def retry_on_except(func):
     def decorated_func(*args, **kwargs):
         _self = args[0]
-        connection_retries = _self.ce_config.get('connection_retries')
+        connection_retries = _self.config.get('connection_retries')
         if not connection_retries:
             return func(*args, **kwargs)
         else:
@@ -73,83 +75,144 @@ class CodeEngineBackend:
     A wrap-up around Code Engine backend.
     """
 
-    def __init__(self, code_engine_config, internal_storage):
+    def __init__(self, ce_config, internal_storage):
         logger.debug("Creating IBM Code Engine client")
         self.name = 'code_engine'
         self.type = 'batch'
-        self.ce_config = code_engine_config
+        self.config = ce_config
         self.internal_storage = internal_storage
-
-        self.kubecfg_path = code_engine_config.get('kubecfg_path')
-        self.user_agent = code_engine_config['user_agent']
-
-        self.iam_api_key = code_engine_config.get('iam_api_key')
-        self.namespace = code_engine_config.get('namespace')
-        self.region = code_engine_config.get('region')
-
-        self.ibm_token_manager = None
         self.is_lithops_worker = utils.is_lithops_worker()
 
-        if self.namespace and self.region:
-            self.cluster = config.CLUSTER_URL.format(self.region)
+        self.user_agent = ce_config['user_agent']
+        self.iam_api_key = ce_config['iam_api_key']
+        self.namespace = ce_config.get('namespace')
+        self.region = ce_config['region']
 
-        if self.iam_api_key and not self.is_lithops_worker:
-            self._get_iam_token()
+        self.user_key = self.iam_api_key[:4].lower()
+        self.project_name = ce_config.get('project_name', f'lithops-{self.region}-{self.user_key}')
+        self.project_id = None
 
+        self.token_manager = None
+        self.code_engine_service_v1 = None
+        self.code_engine_service_v2 = None
+
+        self.cache_dir = os.path.join(CACHE_DIR, self.name)
+        self.cache_file = os.path.join(self.cache_dir, self.project_name + '_data')
+
+        self.cluster = config.CLUSTER_URL.format(self.region)
+
+        if self.is_lithops_worker:
+            logger.debug('Loading incluster kubecfg')
+            load_incluster_config()
+            self.custom_api = client.CustomObjectsApi()
+            self.core_api = client.CoreV1Api()
         else:
-            try:
-                load_kube_config(config_file=self.kubecfg_path)
-                logger.debug("Loading kubecfg file")
-                contexts = list_kube_config_contexts(config_file=self.kubecfg_path)
-                current_context = contexts[1].get('context')
-                self.namespace = current_context.get('namespace')
-                self.cluster = current_context.get('cluster')
+            self._create_k8s_iam_client()
 
-                if self.iam_api_key:
-                    self._get_iam_token()
+        if not self.namespace and not self.is_lithops_worker:
+            self._get_or_create_namespace()
+            self.config['namespace'] = self.namespace
 
-            except Exception:
-                logger.debug('Loading incluster kubecfg')
-                load_incluster_config()
-
-        self.ce_config['namespace'] = self.namespace
-        self.ce_config['cluster'] = self.cluster
         logger.debug(f"Set namespace to {self.namespace}")
         logger.debug(f"Set cluster to {self.cluster}")
-
-        self.custom_api = client.CustomObjectsApi()
-        self.core_api = client.CoreV1Api()
-
-        try:
-            self.region = self.cluster.split('//')[1].split('.')[1]
-        except Exception:
-            self.region = self.cluster.replace('http://', '').replace('https://', '')
 
         self.jobs = []  # list to store executed jobs (job_keys)
 
         msg = COMPUTE_CLI_MSG.format('IBM Code Engine')
-        logger.info(f"{msg} - Region: {self.region}")
+        logger.info(f"{msg} - Project: {self.project_name} - Region: {self.region}")
 
-    @retry_on_except
-    def _get_iam_token(self):
-        """ Requests an IBM IAM token """
-        configuration = client.Configuration.get_default_copy()
-        if self.namespace and self.region:
+    def _create_code_engine_client(self):
+        """
+        Creates new code engine clients
+        """
+        if self.code_engine_service_v1 and self.code_engine_service_v2:
+            return
+
+        from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+        from ibm_code_engine_sdk.code_engine_v2 import CodeEngineV2
+        from ibm_code_engine_sdk.ibm_cloud_code_engine_v1 import IbmCloudCodeEngineV1
+
+        authenticator = IAMAuthenticator(self.iam_api_key)
+        self.code_engine_service_v1 = IbmCloudCodeEngineV1(authenticator=authenticator)
+        self.code_engine_service_v1.set_service_url(config.BASE_URL_V1.format(self.region))
+        self.code_engine_service_v2 = CodeEngineV2(authenticator=authenticator)
+        self.code_engine_service_v2.set_service_url(config.BASE_URL_V2.format(self.region))
+
+    def _get_or_create_namespace(self):
+        """
+        Gets or creates a new namespace
+        """
+        ce_data = load_yaml_config(self.cache_file)
+        self.namespace = ce_data.get('namespace')
+        self.project_id = ce_data.get('project_id')
+
+        if self.namespace:
+            return
+
+        self._create_code_engine_client()
+
+        def get_k8s_namespace(project_id):
+            delegated_refresh_token_payload = {
+                'grant_type': 'urn:ibm:params:oauth:grant-type:apikey',
+                'apikey': self.iam_api_key,
+                'response_type': 'delegated_refresh_token',
+                'receiver_client_ids': 'ce',
+                'delegated_refresh_token_expiry': '3600'
+            }
+            token_manager = self.code_engine_service_v2.authenticator.token_manager
+            request_payload = token_manager.request_payload
+            token_manager.request_payload = delegated_refresh_token_payload
+            iam_response = token_manager.request_token()
+            token_manager.request_payload = request_payload
+            delegated_refresh_token = iam_response['delegated_refresh_token']
+            kc_resp = self.code_engine_service_v1.get_kubeconfig(delegated_refresh_token, project_id)
+            return kc_resp.get_result()['contexts'][0]['context']['namespace']
+
+        response = self.code_engine_service_v2.list_projects().get_result()
+        if 'projects' in response:
+            for project in response['projects']:
+                if project['name'] == self.project_name:
+                    logger.debug(f"Found Code Engine project: {self.project_name}")
+                    self.project_id = project['id']
+                    self.namespace = get_k8s_namespace(self.project_id)
+
+        if not self.namespace:
+            logger.debug(f"Creating new Code Engine project: {self.project_name}")
+            response = self.code_engine_service_v2.create_project(
+                name=self.project_name,
+                resource_group_id=self.config['resource_group_id']
+            )
+            project = response.get_result()
+            self.project_id = project['id']
+            self.namespace = get_k8s_namespace(self.project_id)
+
+        ce_data['project_name'] = self.project_name
+        ce_data['project_id'] = self.project_id
+        ce_data['namespace'] = self.namespace
+        dump_yaml_config(self.cache_file, ce_data)
+
+    def _create_k8s_iam_client(self):
+        """
+        Creates the k8s client with the IAM token
+        """
+        if self.is_lithops_worker:
+            return
+
+        if not self.token_manager:
+            self.token_manager = IAMTokenManager(self.iam_api_key)
+
+        token, expiry_time = self.token_manager.get_token()
+
+        if expiry_time != self.config.get('token_expiry_time'):
+            self.config['token_expiry_time'] = expiry_time
+
+            configuration = client.Configuration.get_default_copy()
             configuration.host = self.cluster
+            configuration.api_key = {"authorization": "Bearer " + token}
+            client.Configuration.set_default(configuration)
 
-        if not self.ibm_token_manager:
-            token = self.ce_config.get('token', None)
-            token_expiry_time = self.ce_config.get('token_expiry_time', None)
-            self.ibm_token_manager = IBMTokenManager(self.iam_api_key,
-                                                     'IAM', token,
-                                                     token_expiry_time)
-
-        token, token_expiry_time = self.ibm_token_manager.get_token()
-        self.ce_config['token'] = token
-        self.ce_config['token_expiry_time'] = token_expiry_time
-
-        configuration.api_key = {"authorization": "Bearer " + token}
-        client.Configuration.set_default(configuration)
+            self.custom_api = client.CustomObjectsApi()
+            self.core_api = client.CoreV1Api()
 
     def _format_jobdef_name(self, runtime_name, runtime_memory, version=__version__):
         name = f'{runtime_name}-{runtime_memory}-{version}'
@@ -162,7 +225,7 @@ class CodeEngineBackend:
         Generates the default runtime image name
         """
         return utils.get_default_container_name(
-            self.name, self.ce_config, 'lithops-codeenigne-default'
+            self.name, self.config, 'lithops-codeenigne-default'
         )
 
     def build_runtime(self, docker_image_name, dockerfile, extra_args=[]):
@@ -187,9 +250,9 @@ class CodeEngineBackend:
         finally:
             os.remove(config.FH_ZIP_LOCATION)
 
-        docker_user = self.ce_config.get("docker_user")
-        docker_password = self.ce_config.get("docker_password")
-        docker_server = self.ce_config.get("docker_server")
+        docker_user = self.config.get("docker_user")
+        docker_password = self.config.get("docker_password")
+        docker_server = self.config.get("docker_server")
 
         logger.debug(f'Pushing runtime {docker_image_name} to container registry')
 
@@ -232,6 +295,7 @@ class CodeEngineBackend:
             self._build_default_runtime(docker_image_name)
 
         logger.debug(f"Deploying runtime: {docker_image_name} - Memory: {memory} Timeout: {timeout}")
+        self._create_k8s_iam_client()
         self._create_job_definition(docker_image_name, memory, timeout)
         runtime_meta = self._generate_runtime_meta(docker_image_name, memory)
 
@@ -243,6 +307,7 @@ class CodeEngineBackend:
         We need to delete job definition
         """
         logger.info(f'Deleting runtime: {runtime_name} - {memory}MB')
+        self._create_k8s_iam_client()
         try:
             jobdef_id = self._format_jobdef_name(runtime_name, memory, version)
             self.custom_api.delete_namespaced_custom_object(
@@ -256,10 +321,11 @@ class CodeEngineBackend:
         except ApiException as e:
             logger.debug(f"Deleting a jobdef failed with {e.status} {e.reason}")
 
-    def clean(self):
+    def clean(self, all=False):
         """
         Deletes all runtimes from all packages
         """
+        self._create_k8s_iam_client()
         self.clear()
         runtimes = self.list_runtimes()
         for image_name, memory, version in runtimes:
@@ -276,12 +342,20 @@ class CodeEngineBackend:
                     namespace=self.namespace,
                     grace_period_seconds=0)
 
+        if all and os.path.exists(self.cache_file):
+            self._create_code_engine_client()
+            logger.debug(f"Deleting Code Engine project: {self.project_name}")
+            self.code_engine_service_v2.delete_project(id=self.project_id)
+            os.remove(self.cache_file)
+
+        shutil.rmtree(self.cache_dir, ignore_errors=True)
+
     def list_runtimes(self, docker_image_name='all'):
         """
         List all the runtimes
         return: list of tuples (docker_image_name, memory)
         """
-
+        self._create_k8s_iam_client()
         runtimes = []
         try:
             jobdefs = self.custom_api.list_namespaced_custom_object(
@@ -313,12 +387,7 @@ class CodeEngineBackend:
         """
         Clean all completed jobruns in the current executor
         """
-        if self.iam_api_key and not self.is_lithops_worker:
-            # try to refresh the token
-            self._get_iam_token()
-            self.custom_api = client.CustomObjectsApi()
-            self.core_api = client.CoreV1Api()
-
+        self._create_k8s_iam_client()
         jobs_to_delete = job_keys or self.jobs
         for job_key in jobs_to_delete:
             try:
@@ -344,11 +413,7 @@ class CodeEngineBackend:
         Invoke -- return information about this invocation
         For array jobs only remote_invocator is allowed
         """
-        if self.iam_api_key and not self.is_lithops_worker:
-            # try to refresh the token
-            self._get_iam_token()
-            self.custom_api = client.CustomObjectsApi()
-            self.core_api = client.CoreV1Api()
+        self._create_k8s_iam_client()
 
         executor_id = job_payload['executor_id']
         job_id = job_payload['job_id']
@@ -374,7 +439,7 @@ class CodeEngineBackend:
 
         jobrun_res['spec']['jobDefinitionRef'] = str(jobdef_name)
         jobrun_res['spec']['jobDefinitionSpec']['arraySpec'] = '0-' + str(total_workers - 1)
-        jobrun_res['spec']['jobDefinitionSpec']['maxExecutionTime'] = self.ce_config['runtime_timeout']
+        jobrun_res['spec']['jobDefinitionSpec']['maxExecutionTime'] = self.config['runtime_timeout']
 
         container = jobrun_res['spec']['jobDefinitionSpec']['template']['containers'][0]
         container['name'] = str(jobdef_name)
@@ -384,7 +449,7 @@ class CodeEngineBackend:
         container['env'][1]['valueFrom']['configMapKeyRef']['name'] = config_map
 
         container['resources']['requests']['memory'] = f'{runtime_memory/1024}G'
-        container['resources']['requests']['cpu'] = str(self.ce_config['runtime_cpu'])
+        container['resources']['requests']['cpu'] = str(self.config['runtime_cpu'])
 
         logger.debug('ExecutorID {} | JobID {} - Going to run {} activations '
                      '{} workers'.format(executor_id, job_id, total_calls, total_workers))
@@ -410,13 +475,13 @@ class CodeEngineBackend:
         Create the container registry secret in the cluster
         (only if credentials are present in config)
         """
-        if not all(key in self.ce_config for key in ["docker_user", "docker_password"]):
+        if not all(key in self.config for key in ["docker_user", "docker_password"]):
             return
 
         logger.debug('Creating container registry secret')
-        docker_server = self.ce_config['docker_server']
-        docker_user = self.ce_config['docker_user']
-        docker_password = self.ce_config['docker_password']
+        docker_server = self.config['docker_server']
+        docker_user = self.config['docker_user']
+        docker_password = self.config['docker_password']
 
         cred_payload = {
             "auths": {
@@ -464,16 +529,16 @@ class CodeEngineBackend:
 
         jobdef_res['metadata']['name'] = jobdef_name
         jobdef_res['metadata']['labels']['version'] = 'lithops_v' + __version__
-        jobdef_res['spec']['maxExecutionTime'] = self.ce_config['runtime_timeout']
+        jobdef_res['spec']['maxExecutionTime'] = self.config['runtime_timeout']
 
         container = jobdef_res['spec']['template']['containers'][0]
         container['image'] = docker_image_name
         container['name'] = jobdef_name
         container['env'][0]['value'] = 'run'
         container['resources']['requests']['memory'] = f'{runtime_memory/1024}G'
-        container['resources']['requests']['cpu'] = str(self.ce_config['runtime_cpu'])
+        container['resources']['requests']['cpu'] = str(self.config['runtime_cpu'])
 
-        if not all(key in self.ce_config for key in ["docker_user", "docker_password"]):
+        if not all(key in self.config for key in ["docker_user", "docker_password"]):
             del jobdef_res['spec']['template']['imagePullSecrets']
 
         try:
@@ -518,22 +583,22 @@ class CodeEngineBackend:
         Method that returns all the relevant information about the runtime set
         in config
         """
-        if 'runtime' not in self.ce_config or self.ce_config['runtime'] == 'default':
-            self.ce_config['runtime'] = self._get_default_runtime_image_name()
+        if 'runtime' not in self.config or self.config['runtime'] == 'default':
+            self.config['runtime'] = self._get_default_runtime_image_name()
 
         runtime_info = {
-            'runtime_name': self.ce_config['runtime'],
-            'runtime_cpu': self.ce_config['runtime_cpu'],
-            'runtime_memory': self.ce_config['runtime_memory'],
-            'runtime_timeout': self.ce_config['runtime_timeout'],
-            'max_workers': self.ce_config['max_workers'],
+            'runtime_name': self.config['runtime'],
+            'runtime_cpu': self.config['runtime_cpu'],
+            'runtime_memory': self.config['runtime_memory'],
+            'runtime_timeout': self.config['runtime_timeout'],
+            'max_workers': self.config['max_workers'],
         }
 
         return runtime_info
 
     @retry_on_except
     def _job_def_exists(self, jobdef_name):
-        logger.debug(f"Check if job_definition {jobdef_name} exists")
+        logger.debug(f"Checking if job_definition {jobdef_name} already exists")
         try:
             self.custom_api.get_namespaced_custom_object(
                 group=config.DEFAULT_GROUP,

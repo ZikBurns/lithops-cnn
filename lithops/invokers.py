@@ -106,8 +106,10 @@ class Invoker:
                .format(self.executor_id, job_id, self.runtime_name))
         msg = msg + f'- {runtime_memory}MB' if runtime_memory else msg
         logger.info(msg)
+
         runtime_key = self.compute_handler.get_runtime_key(self.runtime_name, runtime_memory, __version__)
         runtime_meta = self.internal_storage.get_runtime_meta(runtime_key)
+
         if not runtime_meta:
             msg = f'Runtime {self.runtime_name}'
             msg = msg + f' with {runtime_memory}MB' if runtime_memory else msg

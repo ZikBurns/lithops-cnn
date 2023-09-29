@@ -82,9 +82,9 @@ class OpenWhiskBackend:
 
     def build_runtime(self, docker_image_name, dockerfile, extra_args=[]):
         """
-        Builds a new runtime from a Docker file and pushes it to the Docker hub
+        Builds a new runtime from a Docker file and pushes it to the registry
         """
-        logger.info(f'Building runtime {docker_image_name} from {dockerfile}')
+        logger.info(f'Building runtime {docker_image_name} from {dockerfile or "Dockerfile"}')
 
         docker_path = utils.get_docker_path()
 
@@ -147,7 +147,7 @@ class OpenWhiskBackend:
         action_name = self._format_function_name(docker_image_name, memory, version)
         self.cf_client.delete_action(self.package, action_name)
 
-    def clean(self):
+    def clean(self, **kwargs):
         """
         Deletes all runtimes from all packages
         """

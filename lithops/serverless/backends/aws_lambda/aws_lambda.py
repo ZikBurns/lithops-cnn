@@ -36,8 +36,8 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-LITHOPS_FUNCTION_ZIP = '/tmp/lithops_lambda.zip'
-BUILD_LAYER_FUNCTION_ZIP = '/tmp/build_layer.zip'
+LITHOPS_FUNCTION_ZIP = 'lithops_lambda.zip'
+BUILD_LAYER_FUNCTION_ZIP = 'build_layer.zip'
 
 
 class AWSLambdaBackend:
@@ -59,7 +59,7 @@ class AWSLambdaBackend:
 
         self.user_key = lambda_config['access_key_id'][-4:].lower()
         self.package = f'lithops_v{__version__.replace(".", "-")}_{self.user_key}'
-        self.region_name = lambda_config['region_name']
+        self.region_name = lambda_config['region']
         self.role_arn = lambda_config['execution_role']
 
         logger.debug('Creating Boto3 AWS Session and Lambda Client')
@@ -397,10 +397,7 @@ class AWSLambdaBackend:
 
         layer_arn = self._get_layer(runtime_name)
         if not layer_arn:
-            start=time.time()
             layer_arn = self._create_layer(runtime_name)
-            end = time.time()
-            logger.info(f"Layer Creation time: ",end-start)
 
         code = self._create_handler_bin()
         env_vars = {t['name']: t['value'] for t in self.lambda_config['env_vars']}
@@ -576,7 +573,7 @@ class AWSLambdaBackend:
                 layer = self._format_layer_name(runtime_name, version)
                 self._delete_layer(layer)
 
-    def clean(self):
+    def clean(self, **kwargs):
         """
         Deletes all Lithops lambda runtimes for this user
         """

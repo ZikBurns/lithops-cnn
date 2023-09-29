@@ -23,6 +23,7 @@ import paramiko
 import time
 import logging
 import uuid
+from datetime import datetime
 from ibm_vpc import VpcV1
 from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
 from ibm_cloud_sdk_core import ApiException
@@ -30,9 +31,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 from lithops.version import __version__
 from lithops.util.ssh_client import SSHClient
-from lithops.constants import COMPUTE_CLI_MSG, CACHE_DIR
+from lithops.constants import COMPUTE_CLI_MSG, CACHE_DIR, SA_IMAGE_NAME_DEFAULT
 from lithops.config import load_yaml_config, dump_yaml_config
-from lithops.standalone.utils import CLOUD_CONFIG_WORKER, CLOUD_CONFIG_WORKER_PK, ExecMode
+from lithops.standalone.utils import CLOUD_CONFIG_WORKER, CLOUD_CONFIG_WORKER_PK, ExecMode, get_host_setup_script
 from lithops.standalone.standalone import LithopsValidationError
 
 logger = logging.getLogger(__name__)
@@ -43,19 +44,23 @@ VPC_API_VERSION = '2021-09-21'
 
 class IBMVPCBackend:
 
-    def __init__(self, ibm_vpc_config, mode):
+    def __init__(self, config, mode):
         logger.debug("Creating IBM VPC client")
         self.name = 'ibm_vpc'
-        self.config = ibm_vpc_config
+        self.config = config
         self.mode = mode
 
+        self.vpc_data = {}
         self.vpc_name = None
-        self.vpc_data = None
         self.vpc_key = None
 
+        self.vpc_data_type = 'provided' if 'vpc_id' in self.config else 'created'
+        self.ssh_data_type = 'provided' if 'ssh_key_id' in self.config else 'created'
+
         self.endpoint = self.config['endpoint']
-        self.region = self.endpoint.split('//')[1].split('.')[0]
+        self.region = self.config['region']
         self.cache_dir = os.path.join(CACHE_DIR, self.name)
+        self.cache_file = os.path.join(self.cache_dir, self.region + '_data')
         self.custom_image = self.config.get('custom_lithops_image')
 
         logger.debug(f'Setting VPC endpoint to: {self.endpoint}')
@@ -81,20 +86,22 @@ class IBMVPCBackend:
         """
         Loads VPC data from local cache
         """
-        vpc_data_filename = os.path.join(self.cache_dir, 'data')
-        self.vpc_data = load_yaml_config(vpc_data_filename)
+        self.vpc_data = load_yaml_config(self.cache_file)
 
-        if not self.vpc_data:
-            logger.debug(f'Could not find VPC cache data in {vpc_data_filename}')
-        elif 'vpc_id' in self.vpc_data:
-            self.vpc_key = self.vpc_data['vpc_id'].split('-')[2]
+        if self.vpc_data:
+            logger.debug(f'VPC data loaded from {self.cache_file}')
+
+        if 'vpc_id' in self.vpc_data:
+            self.vpc_key = self.vpc_data['vpc_id'][-6:]
+            self.vpc_name = self.vpc_data['vpc_name']
+
+        return self.vpc_data
 
     def _dump_vpc_data(self):
         """
         Dumps VPC data to local cache
         """
-        vpc_data_filename = os.path.join(self.cache_dir, 'data')
-        dump_yaml_config(vpc_data_filename, self.vpc_data)
+        dump_yaml_config(self.cache_file, self.vpc_data)
 
     def _create_vpc(self):
         """
@@ -114,13 +121,12 @@ class IBMVPCBackend:
 
         vpc_info = None
 
-        host_id = str(uuid.getnode())[-6:]
         iam_id = self.iam_api_key[:4].lower()
-        self.vpc_name = self.config.get('vpc_name', f'lithops-vpc-{iam_id}-{host_id}')
+        self.vpc_name = self.config.get('vpc_name', f'lithops-vpc-{iam_id}-{str(uuid.uuid4())[-6:]}')
         logger.debug(f'Setting VPC name to: {self.vpc_name}')
 
         assert re.match("^[a-z0-9-:-]*$", self.vpc_name),\
-            'VPC name "{}" not valid'.format(self.vpc_name)
+            f'VPC name "{self.vpc_name}" not valid'
 
         vpcs_info = self.vpc_cli.list_vpcs().get_result()
         for vpc in vpcs_info['vpcs']:
@@ -139,9 +145,6 @@ class IBMVPCBackend:
 
         self.config['vpc_id'] = vpc_info['id']
         self.config['security_group_id'] = vpc_info['default_security_group']['id']
-
-        # Set the prefix used for the VPC resources
-        self.vpc_key = self.config['vpc_id'].split('-')[2]
 
         deloy_ssh_rule = True
         deploy_icmp_rule = True
@@ -191,8 +194,8 @@ class IBMVPCBackend:
             except ApiException:
                 pass
 
-        keyname = f'lithops-key-{str(uuid.getnode())[-6:]}'
-        filename = os.path.join("~", ".ssh", f"{keyname}.id_rsa")
+        keyname = f'lithops-key-{str(uuid.uuid4())[-8:]}'
+        filename = os.path.join("~", ".ssh", f"{keyname}.{self.name}.id_rsa")
         key_filename = os.path.expanduser(filename)
 
         key_info = None
@@ -303,11 +306,13 @@ class IBMVPCBackend:
 
         if not gateway_data:
             logger.debug(f'Creating Gateway {gateway_name}')
+            fip, fip_id = self._get_or_create_floating_ip()
             gateway_prototype = {}
             gateway_prototype['vpc'] = {'id': self.config['vpc_id']}
             gateway_prototype['zone'] = {'name': self.config['zone_name']}
             gateway_prototype['name'] = gateway_name
             gateway_prototype['resource_group'] = {'id': self.config['resource_group_id']}
+            gateway_prototype['floating_ip'] = {'id': fip_id}
             response = self.vpc_cli.create_public_gateway(**gateway_prototype)
             gateway_data = response.result
 
@@ -317,9 +322,32 @@ class IBMVPCBackend:
         self.vpc_cli.set_subnet_public_gateway(
             self.config['subnet_id'], {'id': self.config['gateway_id']})
 
-    def _create_floating_ip(self):
+    def _get_or_create_floating_ip(self):
         """
         Creates a new floating IP address
+        """
+        fip_data = None
+
+        floating_ips_info = self.vpc_cli.list_floating_ips().get_result()
+        for fip in floating_ips_info['floating_ips']:
+            if fip['name'].startswith("lithops-recyclable") and 'target' not in fip:
+                fip_data = fip
+
+        if not fip_data:
+            floating_ip_name = f'lithops-recyclable-{str(uuid.uuid4())[-4:]}'
+            logger.debug(f'Creating floating IP {floating_ip_name}')
+            floating_ip_prototype = {}
+            floating_ip_prototype['name'] = floating_ip_name
+            floating_ip_prototype['zone'] = {'name': self.config['zone_name']}
+            floating_ip_prototype['resource_group'] = {'id': self.config['resource_group_id']}
+            response = self.vpc_cli.create_floating_ip(floating_ip_prototype)
+            fip_data = response.result
+
+        return fip_data['address'], fip_data['id']
+
+    def _create_master_floating_ip(self):
+        """
+        Creates the master VM floating IP address
         """
         if 'floating_ip_id' in self.config:
             return
@@ -333,52 +361,54 @@ class IBMVPCBackend:
             except ApiException:
                 pass
 
-        floating_ip_data = None
+        if 'floating_ip_id' not in self.config:
+            fip, fip_id = self._get_or_create_floating_ip()
+            self.config['floating_ip'] = fip
+            self.config['floating_ip_id'] = fip_id
 
-        floating_ips_info = self.vpc_cli.list_floating_ips().get_result()
-        for fip in floating_ips_info['floating_ips']:
-            if fip['name'].startswith("lithops-recyclable") and fip['status'] == 'available':
-                floating_ip_data = fip
+    def _request_image_id(self):
+        """
+        Requests the Ubuntu Image ID
+        """
+        if 'image_id' in self.config:
+            return
 
-        if not floating_ip_data:
-            floating_ip_name = f'lithops-recyclable-{str(uuid.uuid1())[-4:]}'
-            logger.debug(f'Creating floating IP {floating_ip_name}')
-            floating_ip_prototype = {}
-            floating_ip_prototype['name'] = floating_ip_name
-            floating_ip_prototype['zone'] = {'name': self.config['zone_name']}
-            floating_ip_prototype['resource_group'] = {'id': self.config['resource_group_id']}
-            response = self.vpc_cli.create_floating_ip(floating_ip_prototype)
-            floating_ip_data = response.result
+        images_def = self.vpc_cli.list_images().result['images']
+        images_user = self.vpc_cli.list_images(resource_group_id=self.config['resource_group_id']).result['images']
+        images_def.extend(images_user)
 
-        self.config['floating_ip'] = floating_ip_data['address']
-        self.config['floating_ip_id'] = floating_ip_data['id']
+        if 'image_id' in self.vpc_data:
+            for image in images_def:
+                if image['id'] == self.vpc_data['image_id'] and \
+                   not image['name'].startswith('ibm-ubuntu-22'):
+                    self.config['image_id'] = self.vpc_data['image_id']
+                    break
+
+        if 'image_id' not in self.config:
+            for image in images_def:
+                if image['name'] == SA_IMAGE_NAME_DEFAULT:
+                    logger.debug(f"Found default VM image: {SA_IMAGE_NAME_DEFAULT}")
+                    self.config['image_id'] = image['id']
+                    break
+
+        if 'image_id' not in self.config:
+            for image in images_def:
+                if image['name'].startswith('ibm-ubuntu-22') \
+                   and "amd64" in image['name']:
+                    self.config['image_id'] = image['id']
+                    break
 
     def _create_master_instance(self):
         """
         Creates the master VM insatnce
         """
-        if self.mode in [ExecMode.CREATE.value, ExecMode.REUSE.value]:
-            if 'image_id' not in self.config and 'image_id' in self.vpc_data:
-                self.config['image_id'] = self.vpc_data['image_id']
-
-            if 'image_id' not in self.config:
-                for image in self.vpc_cli.list_images().result['images']:
-                    if 'ubuntu-22' in image['name']:
-                        self.config['image_id'] = image['id']
-
-        name = self.config.get('instance_name') or f'lithops-master-{self.vpc_key}'
+        name = self.config.get('master_name') or f'lithops-master-{self.vpc_key}'
         self.master = IBMVPCInstance(name, self.config, self.vpc_cli, public=True)
         self.master.public_ip = self.config['floating_ip']
         self.master.instance_id = self.config['instance_id'] if self.mode == ExecMode.CONSUME.value else None
         self.master.profile_name = self.config['master_profile_name']
         self.master.delete_on_dismantle = False
         self.master.ssh_credentials.pop('password')
-
-        if self.mode in [ExecMode.CREATE.value, ExecMode.REUSE.value]:
-            instance_data = self.master.get_instance_data()
-            if instance_data:
-                self.master.private_ip = instance_data['primary_network_interface']['primary_ipv4_address']
-                self.master.instance_id = instance_data['id']
 
     def init(self):
         """
@@ -394,38 +424,50 @@ class IBMVPCBackend:
 
             ins_id = self.config['instance_id']
             if not self.vpc_data or ins_id != self.vpc_data.get('instance_id'):
-                self.config['instance_name'] = self.vpc_cli.get_instance(ins_id).get_result()['name']
+                name = self.vpc_cli.get_instance(ins_id).get_result()['name']
+                self.config['master_name'] = name
 
             # Create the master VM instance
             self._create_master_instance()
 
             self.vpc_data = {
                 'mode': self.mode,
-                'instance_id': self.config['instance_id'],
-                'instance_name': self.config['instance_name'],
-                'floating_ip': self.config['ip_address']
+                'vpc_data_type': 'provided',
+                'ssh_data_type': 'provided',
+                'master_name': self.master.name,
+                'master_id': self.master.instance_id,
+                'floating_ip': self.master.public_ip
             }
 
         elif self.mode in [ExecMode.CREATE.value, ExecMode.REUSE.value]:
 
             # Create the VPC if not exists
             self._create_vpc()
+
+            # Set the suffix used for the VPC resources
+            self.vpc_key = self.config['vpc_id'][-6:]
+
             # Create the ssh key pair if not exists
             self._create_ssh_key()
             # Create a new subnaet if not exists
             self._create_subnet()
             # Create a new gateway if not exists
             self._create_gateway()
-            # Create a new floating IP if not exists
-            self._create_floating_ip()
+            # Create the master VM floating IP address
+            self._create_master_floating_ip()
+            # Requests the Ubuntu image ID
+            self._request_image_id()
 
             # Create the master VM instance
             self._create_master_instance()
 
             self.vpc_data = {
                 'mode': self.mode,
-                'instance_name': self.master.name,
-                'instance_id': '0af1',
+                'vpc_data_type': self.vpc_data_type,
+                'ssh_data_type': self.ssh_data_type,
+                'master_name': self.master.name,
+                'master_id': self.vpc_key,
+                'vpc_name': self.vpc_name,
                 'vpc_id': self.config['vpc_id'],
                 'subnet_id': self.config['subnet_id'],
                 'security_group_id': self.config['security_group_id'],
@@ -440,18 +482,117 @@ class IBMVPCBackend:
 
         self._dump_vpc_data()
 
+    def build_image(self, image_name, script_file, overwrite, extra_args=[]):
+        """
+        Builds a new VM Image
+        """
+        images = self.vpc_cli.list_images(name=image_name, resource_group_id=self.config['resource_group_id']).result['images']
+        if len(images) > 0:
+            image_id = images[0]['id']
+            if overwrite:
+                logger.debug(f"Deleting existing VM Image '{image_name}'")
+                self.vpc_cli.delete_image(id=image_id)
+                while len(self.vpc_cli.list_images(name=image_name, resource_group_id=self.config['resource_group_id']).result['images']) > 0:
+                    time.sleep(2)
+            else:
+                raise Exception(f"The image with name '{image_name}' already exists with ID: '{image_id}'."
+                                " Use '--overwrite' or '-o' if you want ot overwrite it")
+
+        initial_vpc_data = self._load_vpc_data()
+
+        self.init()
+
+        fip, fip_id = self._get_or_create_floating_ip()
+        self.config['floating_ip'] = fip
+        self.config['floating_ip_id'] = fip_id
+
+        build_vm = IBMVPCInstance(image_name, self.config, self.vpc_cli, public=True)
+        build_vm.public_ip = self.config['floating_ip']
+        build_vm.profile_name = self.config['master_profile_name']
+        build_vm.delete_on_dismantle = False
+        build_vm.create()
+        build_vm.wait_ready()
+
+        logger.debug(f"Uploading installation script to {build_vm}")
+        remote_script = "/tmp/install_lithops.sh"
+        script = get_host_setup_script()
+        build_vm.get_ssh_client().upload_data_to_file(script, remote_script)
+        logger.debug("Executing installation script. Be patient, this process can take up to 3 minutes")
+        build_vm.get_ssh_client().run_remote_command(f"chmod 777 {remote_script}; sudo {remote_script}; rm {remote_script};")
+        logger.debug("Installation script finsihed")
+
+        if script_file:
+            script = os.path.expanduser(script_file)
+            logger.debug(f"Uploading user script {script_file} to {build_vm}")
+            remote_script = "/tmp/install_user_lithops.sh"
+            build_vm.get_ssh_client().upload_local_file(script, remote_script)
+            logger.debug("Executing user script. Be patient, this process can take long")
+            build_vm.get_ssh_client().run_remote_command(f"chmod 777 {remote_script}; sudo {remote_script}; rm {remote_script};")
+            logger.debug("User script finsihed")
+
+        build_vm.stop()
+        build_vm.wait_stopped()
+
+        vm_data = build_vm.get_instance_data()
+        volume_id = vm_data['boot_volume_attachment']['volume']['id']
+
+        image_prototype = {}
+        image_prototype['name'] = image_name
+        image_prototype['source_volume'] = {'id': volume_id}
+        image_prototype['resource_group'] = {'id': self.config['resource_group_id']}
+        self.vpc_cli.create_image(image_prototype)
+
+        logger.debug("Be patient, VM imaging can take up to 6 minutes")
+
+        while True:
+            images = self.vpc_cli.list_images(name=image_name, resource_group_id=self.config['resource_group_id']).result['images']
+            if len(images) > 0:
+                logger.debug(f"VM Image is being created. Current status: {images[0]['status']}")
+                if images[0]['status'] == 'available':
+                    break
+            time.sleep(30)
+
+        build_vm.delete()
+
+        if not initial_vpc_data:
+            self.clean(all)
+
+        logger.info(f"VM Image created. Image ID: {images[0]['id']}")
+
+    def list_images(self):
+        """
+        List VM Images
+        """
+        images_def = self.vpc_cli.list_images().result['images']
+        images_user = self.vpc_cli.list_images(resource_group_id=self.config['resource_group_id']).result['images']
+        images_def.extend(images_user)
+
+        result = set()
+
+        for img in images_def:
+            if img['operating_system']['family'] == 'Ubuntu Linux':
+                opsys = img['operating_system']['display_name']
+                image_name = img['name']
+                image_id = img['id']
+                created_at = datetime.strptime(img['created_at'], "%Y-%m-%dT%H:%M:%SZ")
+                created_at = created_at.strftime("%Y-%m-%d %H:%M:%S")
+                if '22' in opsys:
+                    result.add((image_name, image_id, created_at))
+
+        return sorted(result, key=lambda x: x[2], reverse=True)
+
     def _delete_vm_instances(self, all=False):
         """
         Deletes all VM instances in the VPC
         """
-        msg = (f'Deleting all Lithops worker VMs in {self.vpc_name}'
+        msg = (f'Deleting all Lithops worker VMs from {self.vpc_name}'
                if self.vpc_name else 'Deleting all Lithops worker VMs')
         logger.info(msg)
 
         def delete_instance(instance_info):
             ins_name, ins_id = instance_info
             try:
-                logger.info(f'Deleting instance {ins_name}')
+                logger.debug(f'Deleting instance {ins_name}')
                 self.vpc_cli.delete_instance(ins_id)
             except ApiException as err:
                 if err.code == 404:
@@ -465,7 +606,8 @@ class IBMVPCBackend:
             instances = set()
             instances_info = self.vpc_cli.list_instances().get_result()
             for ins in instances_info['instances']:
-                if ins['name'].startswith(vms_prefixes):
+                if ins['name'].startswith(vms_prefixes) \
+                   and ins['vpc']['id'] == self.vpc_data['vpc_id']:
                     instances.add((ins['name'], ins['id']))
             return instances
 
@@ -483,6 +625,13 @@ class IBMVPCBackend:
             else:
                 break
 
+        master_pk = os.path.join(self.cache_dir, f"{self.vpc_data['master_name']}-id_rsa.pub")
+        if os.path.isfile(master_pk):
+            os.remove(master_pk)
+
+        if self.vpc_data['vpc_data_type'] == 'provided':
+            return
+
         # Wait until all instances are deleted
         while get_instances():
             time.sleep(1)
@@ -492,15 +641,8 @@ class IBMVPCBackend:
         Deletes all VM instances in the VPC
         """
         subnet_name = f'lithops-subnet-{self.vpc_key}'
-        if 'subnet_id' not in self.vpc_data:
-            subnets_info = self.vpc_cli.list_subnets().get_result()
-
-            for subn in subnets_info['subnets']:
-                if subn['name'] == subnet_name:
-                    self.vpc_data['subnet_id'] = subn['id']
-
         if 'subnet_id' in self.vpc_data:
-            logger.info(f'Deleting subnet {subnet_name}')
+            logger.debug(f'Deleting subnet {subnet_name}')
 
             try:
                 self.vpc_cli.unset_subnet_public_gateway(self.vpc_data['subnet_id'])
@@ -523,45 +665,10 @@ class IBMVPCBackend:
         Deletes the public gateway
         """
         gateway_name = f'lithops-gateway-{self.vpc_key}'
-        if 'gateway_id' not in self.vpc_data:
-            gateways_info = self.vpc_cli.list_public_gateways().get_result()
-
-            for gw in gateways_info['public_gateways']:
-                if ['name'] == gateway_name:
-                    self.vpc_data['gateway_id'] = gw['id']
-
         if 'gateway_id' in self.vpc_data:
-            logger.info(f'Deleting gateway {gateway_name}')
+            logger.debug(f'Deleting gateway {gateway_name}')
             try:
                 self.vpc_cli.delete_public_gateway(self.vpc_data['gateway_id'])
-            except ApiException as err:
-                if err.code == 404 or err.code == 400:
-                    logger.debug(err)
-                else:
-                    raise err
-
-    def _delete_ssh_key(self):
-        """
-        Deletes the ssh key
-        """
-        keyname = f'lithops-key-{str(uuid.getnode())[-6:]}'
-        filename = os.path.join("~", ".ssh", f"{keyname}.id_rsa")
-        key_filename = os.path.expanduser(filename)
-
-        if os.path.isfile(key_filename):
-            os.remove(key_filename)
-        if os.path.isfile(f"{key_filename}.pub"):
-            os.remove(f"{key_filename}.pub")
-
-        if 'ssh_key_id' not in self.vpc_data:
-            for key in self.vpc_cli.list_keys().result["keys"]:
-                if key["name"] == keyname:
-                    self.vpc_data['ssh_key_id'] = key['id']
-
-        if 'ssh_key_id' in self.vpc_data:
-            logger.info(f'Deleting SSH key {keyname}')
-            try:
-                self.vpc_cli.delete_key(id=self.vpc_data['ssh_key_id'])
             except ApiException as err:
                 if err.code == 404 or err.code == 400:
                     logger.debug(err)
@@ -572,16 +679,44 @@ class IBMVPCBackend:
         """
         Deletes the VPC
         """
-        if 'vpc_id' not in self.vpc_data:
-            vpcs_info = self.vpc_cli.list_vpcs().get_result()
-            for vpc in vpcs_info['vpcs']:
-                if vpc['name'] == self.vpc_name:
-                    self.vpc_data['vpc_id'] = vpc['id']
+        if self.vpc_data['vpc_data_type'] == 'provided':
+            return
+
+        msg = (f'Deleting all Lithops VPC resources from {self.vpc_name}')
+        logger.info(msg)
+
+        self._delete_subnet()
+        self._delete_gateway()
 
         if 'vpc_id' in self.vpc_data:
-            logger.info(f'Deleting VPC {self.vpc_data["vpc_id"]}')
+            logger.debug(f'Deleting VPC {self.vpc_data["vpc_name"]}')
             try:
                 self.vpc_cli.delete_vpc(self.vpc_data['vpc_id'])
+            except ApiException as err:
+                if err.code == 404 or err.code == 400:
+                    logger.debug(err)
+                else:
+                    raise err
+
+    def _delete_ssh_key(self):
+        """
+        Deletes the ssh key
+        """
+        if self.vpc_data['ssh_data_type'] == 'provided':
+            return
+
+        key_filename = self.vpc_data['ssh_key_filename']
+        if "lithops-key-" in key_filename:
+            if os.path.isfile(key_filename):
+                os.remove(key_filename)
+            if os.path.isfile(f"{key_filename}.pub"):
+                os.remove(f"{key_filename}.pub")
+
+        if 'ssh_key_id' in self.vpc_data:
+            keyname = key_filename.split('/')[-1].split('.')[0]
+            logger.debug(f'Deleting SSH key {keyname}')
+            try:
+                self.vpc_cli.delete_key(id=self.vpc_data['ssh_key_id'])
             except ApiException as err:
                 if err.code == 404 or err.code == 400:
                     logger.debug(err)
@@ -593,16 +728,22 @@ class IBMVPCBackend:
         Clean all the backend resources
         The gateway public IP and the floating IP are never deleted
         """
-        logger.debug('Cleaning IBM VPC resources')
+        logger.info('Cleaning IBM VPC resources')
 
-        self._delete_vm_instances(all=all)
+        self._load_vpc_data()
 
-        if all:
-            self._load_vpc_data()
-            self._delete_subnet()
-            self._delete_gateway()
-            self._delete_ssh_key()
-            self._delete_vpc()
+        if not self.vpc_data:
+            return
+
+        if self.vpc_data['mode'] == ExecMode.CONSUME.value:
+            if os.path.exists(self.cache_file):
+                os.remove(self.cache_file)
+        else:
+            self._delete_vm_instances(all=all)
+            self._delete_vpc() if all else None
+            self._delete_ssh_key() if all else None
+            if all and os.path.exists(self.cache_file):
+                os.remove(self.cache_file)
 
     def clear(self, job_keys=None):
         """
@@ -620,7 +761,7 @@ class IBMVPCBackend:
                 ex.map(lambda worker: worker.stop(), self.workers)
             self.workers = []
 
-        if include_master and self.mode == ExecMode.CONSUME.value:
+        if include_master or self.mode == ExecMode.CONSUME.value:
             # in consume mode master VM is a worker
             self.master.stop()
 
@@ -665,7 +806,7 @@ class IBMVPCBackend:
         Creates the runtime key
         """
         name = runtime_name.replace('/', '-').replace(':', '-')
-        runtime_key = os.path.join(self.name, version, self.vpc_data['instance_id'], name)
+        runtime_key = os.path.join(self.name, version, self.vpc_data['master_id'], name)
         return runtime_key
 
 
@@ -722,7 +863,7 @@ class IBMVPCInstance:
 
     def get_ssh_client(self):
         """
-        Creates an ssh client against the VM only if the Instance is the master
+        Creates an ssh client against the VM
         """
 
         if not self.validated and self.public and self.instance_id:
@@ -750,9 +891,11 @@ class IBMVPCInstance:
                 raise LithopsValidationError(
                     f"No public key from keys: {names} on master {self} not a pair for private ssh key {key_filename}")
 
-        if self.private_ip or self.public_ip:
-            if not self.ssh_client:
-                self.ssh_client = SSHClient(self.public_ip or self.private_ip, self.ssh_credentials)
+        if not self.ssh_client:
+            if self.public and self.public_ip:
+                self.ssh_client = SSHClient(self.public_ip, self.ssh_credentials)
+            elif self.private_ip:
+                self.ssh_client = SSHClient(self.private_ip, self.ssh_credentials)
 
         return self.ssh_client
 
@@ -791,10 +934,7 @@ class IBMVPCInstance:
 
         start = time.time()
 
-        if self.public:
-            self.get_public_ip()
-        else:
-            self.get_private_ip()
+        self.get_public_ip() if self.public else self.get_private_ip()
 
         while (time.time() - start < timeout):
             if self.is_ready():
@@ -809,7 +949,7 @@ class IBMVPCInstance:
         """
         Creates a new VM instance
         """
-        logger.debug("Creating new VM instance {}".format(self.name))
+        logger.debug(f"Creating new VM instance {self.name}")
 
         security_group_identity_model = {'id': self.config['security_group_id']}
         subnet_identity_model = {'id': self.config['subnet_id']}
@@ -857,9 +997,12 @@ class IBMVPCInstance:
                              .format(self.name, str(err.code), err.message))
             raise err
 
-        logger.debug("VM instance {} created successfully ".format(self.name))
+        self.instance_data = resp.result
+        self.instance_id = self.instance_data['id']
 
-        return resp.result
+        logger.debug(f"VM instance {self.name} created successfully")
+
+        return self.instance_data
 
     def _attach_floating_ip(self, instance):
         """
@@ -869,14 +1012,14 @@ class IBMVPCInstance:
         fip = self.config['floating_ip']
         fip_id = self.config['floating_ip_id']
 
-        # logger.debug('Attaching floating IP {} to VM instance {}'.format(fip, instance['id']))
+        logger.debug(f"Attaching floating IP {fip} to {self}")
 
         # we need to check if floating ip is not attached already. if not, attach it to instance
         instance_primary_ni = instance['primary_network_interface']
 
         if instance_primary_ni['primary_ipv4_address'] and instance_primary_ni['id'] == fip_id:
             # floating ip already atteched. do nothing
-            logger.debug('Floating IP {} already attached to eth0'.format(fip))
+            logger.debug(f'Floating IP {fip} already attached to eth0')
         else:
             self.vpc_cli.add_instance_network_interface_floating_ip(
                 instance['id'], instance['network_interfaces'][0]['id'], fip_id)
@@ -885,12 +1028,10 @@ class IBMVPCInstance:
         """
         Returns the instance information
         """
-        # if self.instance_id:
-        #    self.instance_data = self.vpc_cli.get_instance(self.instance_id).get_result()
-
         instances_data = self.vpc_cli.list_instances(name=self.name).get_result()
         if len(instances_data['instances']) > 0:
             self.instance_data = instances_data['instances'][0]
+            self.instance_id = self.instance_data['id']
 
         return self.instance_data
 
@@ -898,22 +1039,32 @@ class IBMVPCInstance:
         """
         Returns the instance ID
         """
+        if not self.instance_id and self.instance_data:
+            self.instance_id = self.instance_data['id']
+
         if not self.instance_id:
             instance_data = self.get_instance_data()
             if instance_data:
                 self.instance_id = instance_data['id']
             else:
                 logger.debug(f'VM instance {self.name} does not exists')
+
         return self.instance_id
 
     def get_private_ip(self):
         """
         Requests the private IP address
         """
+        if not self.private_ip and self.instance_data:
+            self.private_ip = self.instance_data['primary_network_interface']['primary_ipv4_address']
+
         while not self.private_ip or self.private_ip == '0.0.0.0':
-            time.sleep(1)
             instance_data = self.get_instance_data()
-            self.private_ip = instance_data['primary_network_interface']['primary_ipv4_address']
+            private_ip = instance_data['primary_network_interface']['primary_ipv4_address']
+            if private_ip != '0.0.0.0':
+                self.private_ip = private_ip
+            else:
+                time.sleep(1)
 
         return self.private_ip
 
@@ -921,6 +1072,9 @@ class IBMVPCInstance:
         """
         Requests the public IP address
         """
+        if not self.public:
+            return None
+
         return self.public_ip
 
     def create(self, check_if_exists=False, user_data=None):
@@ -931,20 +1085,15 @@ class IBMVPCInstance:
         vsi_exists = True if self.instance_id else False
 
         if check_if_exists and not vsi_exists:
-            logger.debug('Checking if VM instance {} already exists'.format(self.name))
+            logger.debug(f'Checking if VM instance {self.name} already exists')
             instances_data = self.get_instance_data()
             if instances_data:
-                logger.debug('VM instance {} already exists'.format(self.name))
+                logger.debug(f'VM instance {self.name} already exists')
                 vsi_exists = True
-                self.instance_id = instances_data['id']
 
-        if not vsi_exists:
-            instance = self._create_instance(user_data=user_data)
-            self.instance_id = instance['id']
-        else:
-            self.start()
+        instance = self._create_instance(user_data=user_data) if not vsi_exists else self.start()
 
-        if self.public and instance:
+        if instance and self.public:
             self._attach_floating_ip(instance)
 
         return self.instance_id
@@ -953,7 +1102,7 @@ class IBMVPCInstance:
         """
         Starts the VM instance
         """
-        logger.debug("Starting VM instance {}".format(self.name))
+        logger.debug(f"Starting VM instance {self.name}")
 
         try:
             self.vpc_cli.create_instance_action(self.instance_id, 'start')
@@ -963,13 +1112,13 @@ class IBMVPCInstance:
             else:
                 raise err
 
-        logger.debug("VM instance {} started successfully".format(self.name))
+        logger.debug(f"VM instance {self.name} started successfully")
 
     def _delete_instance(self):
         """
         Deletes the VM instacne and the associated volume
         """
-        logger.debug("Deleting VM instance {}".format(self.name))
+        logger.debug(f"Deleting VM instance {self.name}")
         try:
             self.vpc_cli.delete_instance(self.instance_id)
         except ApiException as err:
@@ -977,15 +1126,41 @@ class IBMVPCInstance:
                 pass
             else:
                 raise err
+
+        self.instance_data = None
         self.instance_id = None
         self.private_ip = None
         self.del_ssh_client()
+
+    def is_stopped(self):
+        """
+        Checks if the VM instance is stoped
+        """
+        data = self.get_instance_data()
+        if data['status'] == 'stopped':
+            return True
+        return False
+
+    def wait_stopped(self, timeout=INSTANCE_START_TIMEOUT):
+        """
+        Waits until the VM instance is stoped
+        """
+        logger.debug(f'Waiting {self} to become stopped')
+
+        start = time.time()
+
+        while (time.time() - start < timeout):
+            if self.is_stopped():
+                return True
+            time.sleep(3)
+
+        raise TimeoutError(f'Stop probe expired on {self}')
 
     def _stop_instance(self):
         """
         Stops the VM instance
         """
-        logger.debug("Stopping VM instance {}".format(self.name))
+        logger.debug(f"Stopping VM instance {self.name}")
         try:
             self.vpc_cli.create_instance_action(self.instance_id, 'stop')
         except ApiException as err:

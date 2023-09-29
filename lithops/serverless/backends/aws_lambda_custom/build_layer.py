@@ -35,6 +35,7 @@ def install_dependencies(event):
     command = [sys.executable, '-m', 'pip', 'install', "-r", "/tmp/requirements.txt", "-t", LAYER_DIR_PATH]
     subprocess.check_call(command)
 
+
     # Remove 'tests' directories
     for root, dirs, files in os.walk(LAYER_DIR_PATH, topdown=False):
         for directory in dirs:
@@ -124,8 +125,9 @@ def lambda_handler(event, context):
                 # shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH, 'torch')
                 shutil.rmtree(torch_path)
 
+            os.remove('/tmp/torch.zip')
 
-            s3.download_file(event['bucket'], "model.pt", os.path.join(TEMP_PATH, 'modules') + '/model.pt')
+            s3.download_file(event['bucket'], event['model_file'], os.path.join(TEMP_PATH, 'modules') + '/'+event['model_file'])
 
             with zipfile.ZipFile(LAYER_ZIP_PATH, 'w') as layer_zip:
                 add_directory_to_zip(layer_zip, os.path.join(TEMP_PATH, 'modules'))
