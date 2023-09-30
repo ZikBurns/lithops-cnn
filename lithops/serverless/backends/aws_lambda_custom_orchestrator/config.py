@@ -43,6 +43,7 @@ CUSTOM_REQUIREMENTS = [
     'aiobotocore'
 ]
 
+MODEL_FILE = "model.pt"
 
 AVAILABLE_PY_RUNTIMES = {
     '3.6': 'python3.6',

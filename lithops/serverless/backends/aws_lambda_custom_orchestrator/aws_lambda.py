@@ -250,6 +250,13 @@ class AWSLambdaBackend:
                 msg = 'An error occurred creating/updating action {}: {}'.format(runtime_name, resp)
                 raise Exception(msg)
 
+            s3_client = self.aws_session.client(
+                's3', region_name=self.region_name)
+            try:
+                s3_client.head_object(Bucket=self.internal_storage.bucket, Key=config.MODEL_FILE)
+            except Exception as e:
+                s3_client.upload_file(config.MODEL_FILE, self.internal_storage.bucket, config.MODEL_FILE)
+
             self._wait_for_function_deployed(func_name)
             logger.debug('OK --> Created "layer builder" function {}'.format(runtime_name))
 
