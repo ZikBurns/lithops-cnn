@@ -8,6 +8,8 @@ import shutil
 import glob
 from botocore.errorfactory import ClientError
 import zipfile
+import platform
+
 TEMP_PATH = '/tmp'
 LAYER_DIR_PATH = os.path.join(TEMP_PATH, 'modules', 'python')
 LAYER_ZIP_PATH = '/tmp/layer.zip'
@@ -118,8 +120,9 @@ def lambda_handler(event, context):
                         file_path = os.path.join(root, file)
                         zipf.write(file_path, arcname=os.path.relpath(file_path, tmp_torch_path))
 
-            with open('/tmp/torch.zip', 'rb') as torch_zip:
-                s3.put_object(Body=torch_zip, Bucket=event['bucket'], Key='torch.zip')
+            pyversion = platform.python_version_tuple()[0] + platform.python_version_tuple()[1]
+            with open(f'/tmp/torch.zip', 'rb') as torch_zip:
+                s3.put_object(Body=torch_zip, Bucket=event['bucket'], Key=f'torch{pyversion}.zip')
 
             if os.path.isdir(torch_path):
                 # shutil.make_archive(torch_path, 'zip', LAYER_DIR_PATH, 'torch')

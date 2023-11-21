@@ -21,7 +21,7 @@ import PIL
 import zipfile
 import shutil
 from time import time
-
+import platform
 import boto3
 
 
@@ -29,7 +29,8 @@ def import_torch():
     if not os.path.exists('/tmp/python'):
         os.mkdir('/tmp/python')
     s3_client = boto3.client('s3')
-    s3_client.download_file('off-sample', 'torch.zip', '/tmp/python/torch.zip')
+    pyversion = platform.python_version_tuple()[0] + platform.python_version_tuple()[1]
+    s3_client.download_file('off-sample', f'torch{pyversion}.zip', '/tmp/python/torch.zip')
     torch_dir = '/tmp/python/torch'
     # append the torch_dir to PATH so python can find it
     sys.path.append(torch_dir)

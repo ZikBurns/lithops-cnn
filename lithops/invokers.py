@@ -155,7 +155,8 @@ class Invoker:
                    'runtime_name': job.runtime_name,
                    'runtime_memory': job.runtime_memory,
                    'worker_processes': job.worker_processes}
-
+        if not isinstance(job.data_byte_strs[0],bytes):
+            payload["data_byte_strs"] = job.data_byte_strs
         return payload
 
     def _run_job(self, job):
@@ -360,6 +361,8 @@ class FaaSInvoker(Invoker):
         else:
             del payload['data_byte_ranges']
             payload['data_byte_strs'] = [job.data_byte_strs[int(call_id)] for call_id in call_ids]
+        if payload['func_key']=="custom":
+            payload['data_byte_strs'] = [job.data_byte_strs[int(call_id)] for call_id in call_ids][0]
 
         # do the invocation
         start = time.time()

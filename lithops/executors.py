@@ -363,6 +363,63 @@ class FunctionExecutor:
 
         return general_executor(payloads)
 
+    def map_cnn_threading_benchmark_imitator(
+            self,
+            map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],
+            force_cold: bool = False,
+            chunksize: Optional[int] = None,
+            extra_args: Optional[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]] = None,
+            extra_env: Optional[Dict[str, str]] = None,
+            runtime_memory: Optional[int] = None,
+            obj_chunk_size: Optional[int] = None,
+            obj_chunk_number: Optional[int] = None,
+            obj_newline: Optional[str] = '\n',
+            timeout: Optional[int] = None,
+            include_modules: Optional[List[str]] = [],
+            exclude_modules: Optional[List[str]] = []
+    ):
+        job_id = self._create_job_id('M')
+        self.last_call = 'map'
+        if (self.runtime_meta == None):
+            runtime_meta = self.invoker.select_runtime(job_id, runtime_memory)
+        else:
+            runtime_meta = self.runtime_meta
+
+        job = create_map_job_cnn_asyncio(
+            config=self.config,
+            internal_storage=self.internal_storage,
+            executor_id=self.executor_id,
+            job_id=job_id,
+            iterdata=map_iterdata,
+            chunksize=chunksize,
+            runtime_meta=runtime_meta,
+            runtime_memory=runtime_memory,
+            extra_env=extra_env,
+            include_modules=include_modules,
+            exclude_modules=exclude_modules,
+            execution_timeout=timeout,
+            extra_args=extra_args,
+            obj_chunk_size=obj_chunk_size,
+            obj_chunk_number=obj_chunk_number,
+            obj_newline=obj_newline
+        )
+        job.func_key = "custom"
+        job.runtime_name = self.invoker.runtime_name
+        job.runtime_memory = self.invoker.runtime_info["runtime_memory"]
+
+        if force_cold:
+            self.compute_handler.force_cold(payload_default)
+
+        futures = self.invoker.run_job(job)
+        self.futures.extend(futures)
+
+        if isinstance(map_iterdata, FuturesList):
+            for fut in map_iterdata:
+                fut._produce_output = False
+
+        return create_futures_list(futures, self)
+
+
     def map_cnn_threading_benchmark(
             self,
             map_iterdata: List[Union[List[Any], Tuple[Any, ...], Dict[str, Any]]],

@@ -477,7 +477,7 @@ def _create_job_cnn_asyncio(
         internal_storage.put_data(data_key, data_bytes)
         data_upload_end = time.time()
         host_job_meta['host_data_upload_time'] = round(data_upload_end - data_upload_start, 6)
-
+        job.data_byte_strs = iterdata
     else:
         # pass iteradata as part of the invocation payload
         logger.debug('ExecutorID {} | JobID {} - Data per activation is < '
