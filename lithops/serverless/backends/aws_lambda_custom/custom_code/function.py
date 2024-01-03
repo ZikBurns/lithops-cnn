@@ -6,6 +6,169 @@ import threading
 import sys
 from queue import Queue
 import concurrent
+import torch
+import os
+from lithops.serverless.backends.aws_lambda_custom.custom_code.scheduler.task_scheduler import TaskScheduler
+from lithops.serverless.backends.aws_lambda_custom.custom_code.model import OffSampleTorchscriptFork
+import logging
+import grpc
+from lithops.serverless.backends.aws_lambda_custom.custom_code.grpc_assets import urlrpc_pb2
+from lithops.serverless.backends.aws_lambda_custom.custom_code.grpc_assets import urlrpc_pb2_grpc
+
+jit_model = torch.jit.load("/opt/model.pt", torch.device('cpu'))
+resources = PredictResource("/opt/model.pt")
+S3_BUCKET = "off-sample"
+config_dict = {
+    'load': {'batch_size': 0, 'max_concurrency': 0},
+    'preprocess': {'batch_size': 0, 'num_cpus': 0},
+    'predict': {'interop': 0, 'intraop': 0, 'n_models': 0}
+}
+inferencer = TaskScheduler(config_dict=config_dict, logging_level=logging.WARNING)
+
+
+@inferencer.task(mode="threading")
+def load(image_dict):
+    result_dict = {}
+    for key in image_dict:
+        # print("Donwloading image", key)
+        image_data = resources.downloadimage(key, S3_BUCKET)
+        # print("Donwloaded image", key)
+        result_dict.update({key: image_data})
+    return result_dict
+
+
+@inferencer.task(mode="multiprocessing", previous=load, batch_format="bytes")
+def preprocess(image_dict):
+    result_dict = {}
+    for key, value in image_dict.items():
+        tensor = resources.transform_image(value)
+        result_dict.update({key: tensor})
+    # print("Transformation finished")
+    return result_dict
+
+
+@inferencer.task(mode="torchscript", previous=preprocess, batch_format="tensor", jit_model=jit_model)
+def predict(tensor_dicts, ensemble):
+    tensors = []
+    for key, value in tensor_dicts.items():
+        tensors.append(value)
+    prediction_results = OffSampleTorchscriptFork(ensemble).predict(tensors)
+    result_dict = {}
+    for key, prediction_result in zip(tensor_dicts.keys(), prediction_results):
+        result_dict.update({key: prediction_result})
+    return result_dict
+
+
+def lambda_function(payload, s3_bucket):
+    payload = payload["body"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    print(payload)
+
+    S3_BUCKET = s3_bucket
+
+    if "WARM_START_FLAG" in os.environ:
+        is_cold_start = False
+    else:
+        is_cold_start = True
+        os.environ["WARM_START_FLAG"] = "True"
+
+    if 'config' in payload.keys():
+        config_dict = payload["config"]
+    print("Scheduler defined")
+
+    port = payload['grpc_port']
+    print("gRPC connecting to", port)
+    rpc_dict = urlrpc_pb2.Dict(key="", value="")
+    channel = grpc.insecure_channel(f'10.0.7.143:{port}')
+    stub = urlrpc_pb2_grpc.URLRPCStub(channel)
+    all_results = []
+    batch = 1
+    rpc_dict = urlrpc_pb2.Dict(key="", value="")
+    finished_urls = [rpc_dict]
+    while batch:
+        response = stub.Add(urlrpc_pb2.urlRequest(finished=finished_urls))
+        finished_urls = []
+        print(response.urls)
+        batch = response.urls
+        if batch:
+            url_dicts = {}
+            for url in batch:
+                url_dicts.update({url: None})
+            prediction_dicts = inferencer.process_tasks(url_dicts, config_dict)
+            for key, result in prediction_dicts.items():
+                rpc_dict = urlrpc_pb2.Dict(key=key, value=str(result))
+                all_results.append({key: str(result)})
+                finished_urls.append(rpc_dict)
+    result = {'predictions': all_results}
+
+    # batch = payload['images']
+    # url_dicts = {}
+    # for url in batch:
+    #     url_dicts.update({url: None})
+
+    # prediction_dicts = inferencer.process_tasks(url_dicts)
+    # print("Finished tasks")
+    # grpc_results = []
+    # result_dicts = {}
+    # for key, result in prediction_dicts.items():
+    #     rpc_dict = urlrpc_pb2.Dict(key=key, value=str(result))
+    #     result_dicts.update({key: str(result)})
+    #     grpc_results.append(rpc_dict)
+    # result = {'predictions': result_dicts}
+    # print(result)
+
+    return {
+        'statusCode': 200,
+        'body': result
+    }
+
+
+# inter intra
+# def lambda_function(payload, s3_bucket):
+#     payload = payload["body"]
+#     if isinstance(payload, str):
+#         payload = json.loads(payload)
+#     print(payload)
+
+#     if "WARM_START_FLAG" in os.environ:
+#         is_cold_start = False
+#     else:
+#         is_cold_start = True
+#         os.environ["WARM_START_FLAG"] = "True"
+
+#     if is_cold_start and payload['inter']:
+#         print("Inter intra available")
+#         torch.set_num_interop_threads(payload['inter'])
+#     if payload['intra']:
+#         print("Inter intra available")
+#         torch.set_num_threads(payload['intra'])
+#         # os.environ["OMP_NUM_THREADS"]=str(payload['intra'])
+#         # os.environ["MKL_NUM_THREADS"]=str(payload['intra'])
+
+#     print(torch.__config__.parallel_info())
+#     print(f"Inter threads assigned: {torch.get_num_interop_threads()}")
+#     print(f"Intra threads assigned: {torch.get_num_threads()}")
+#     predict_resource = PredictResource("/opt/model.pt")
+
+#     start = time.time()
+#     predictions, time_download, time_inference, time_model_init = predict_resource.execute_inference_benchmark(payload,
+#                                                                                                               s3_bucket)
+#     end = time.time()
+#     print("Total time:", end - start)
+
+#     print(f"Inter threads created: {torch.get_num_interop_threads()}")
+#     print(f"Intra threads created: {torch.get_num_threads()}")
+
+#     parallel_info = torch.__config__.parallel_info()
+#     show_info = torch.__config__.show()
+#     result = {'predictions': predictions['predictions'], 'time_download': time_download,
+#               'time_inference': time_inference, 'time_model_init': time_model_init, 'parallel_info': parallel_info,
+#               'show_info': show_info, 'inter': torch.get_num_interop_threads(), 'intra': torch.get_num_threads()}
+#     return {
+#         'statusCode': 200,
+#         'body': result
+#     }
 
 
 # def lambda_function(payload, s3_bucket):
@@ -366,7 +529,6 @@ def divide_list_into_chunks(input_list, chunk_size):
 
     return chunks
 
-
 # Split-Pipelining-threadingpool
 # def lambda_function(payload, s3_bucket):
 #     predict_resource = PredictResource("/opt/model.pt")
@@ -438,141 +600,141 @@ def divide_list_into_chunks(input_list, chunk_size):
 
 
 # Parallel Split Pipelining Threadpooling
-def lambda_function(payload, s3_bucket):
-    predict_resource = PredictResource("/opt/model.pt")
-    payload = payload["body"]
-    if isinstance(payload, str):
-        payload = json.loads(payload)
-    urls_general = payload["images"]
-    arguments = []
-    stream_size_download = payload["download_stream_size"]
-    stream_size_inference = payload["inference_stream_size"]
-
-    for i in range(0, len(urls_general), stream_size_download):
-        chunk = urls_general[i:i + stream_size_download]
-        argument = {"images": chunk}
-        arguments.append(argument)
-
-    def producer_task(args):
-        queue, predict_resource, argument = args
-        image_datas = load_images(argument, predict_resource)
-        # push data into queue
-        for image_data in image_datas:
-            queue.put(image_data)
-
-    # producer manager task
-    def producer_manager(queue, predict_resource, arguments):
-        # create thread pool
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(arguments)) as executor:
-            # use threads to generate items and put into the queue
-            producer_threads = [executor.submit(producer_task, (queue, predict_resource, argument)) for
-                                argument in arguments]
-            for producer_thread in concurrent.futures.as_completed(producer_threads):
-                pass
-        # put a signal to expect no further tasks
-        queue.put(None)
-        # report a message
-        print('>producer_manager done.')
-
-    # consumer task
-    def consumer_task(args):
-        queue, stream_size_inference = args
-        while True:
-            stream = []
-            for _ in range(stream_size_inference):
-                value = queue.get()
-                if not value:
-                    queue.put(value)
-                    return
-                stream.append(value)
-            result = execute_chunk(stream)
-            return result
-
-    # consumer manager
-    def consumer_manager(queue, num_images, stream_size_inference, results):
-        distributions = distribute_number(num_images, stream_size_inference)
-        # create thread pool
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(distributions)) as executor:
-            consumer_threads = [executor.submit(consumer_task, (queue, distribution)) for distribution in distributions]
-            # wait for all tasks to complete
-            for consumer_thread in concurrent.futures.as_completed(consumer_threads):
-                pass
-        for consumer_thread in consumer_threads:
-            results.append(consumer_thread.result())
-
-    def execute_chunk(images_data):
-        print(f"Inference started.\n")
-        predictions = predict_resource.predict(images_data)
-        result = {'predictions': predictions['predictions']}
-        print(f"Inference finished.\n")
-        return result
-
-    def download_images(argument, predict_resource):
-        print(f"Download started.\n")
-        s3_bucket = "off-sample-eu"
-        images_data = predict_resource.downloadimages(argument["images"], s3_bucket)
-        print(f"Download finished.\n")
-        return images_data
-
-    def load_images(argument, predict_resource):
-        print(f"Download started.\n")
-        s3_bucket = "off-sample"
-        images_data = predict_resource.downloadimages(argument["images"], s3_bucket)
-        print(f"Download finished.\n")
-        return images_data
-
-    def distribute_number(number, batch_size):
-        result = []
-
-        while number > 0:
-            if number >= batch_size:
-                result.append(batch_size)
-                number -= batch_size
-            else:
-                result.append(number)
-                number = 0
-
-        return result
-
-    def download_images(args):
-        predict_resource, arguments, stream_size_download, queue = args
-        arguments = divide_list_into_chunks(arguments, stream_size_download)
-        for images in arguments:
-            print(f"Download started: {images}\n")
-            s3_bucket = "off-sample"
-            images_data = predict_resource.downloadimages(images, s3_bucket)
-            print(f"Download  finished.\n")
-            for image_data in images_data:
-                queue.put(image_data)
-
-    results = []
-    start = time.time()
-    # create the shared queue
-    queue = Queue()
-    # run the consumer
-    consumer = threading.Thread(target=consumer_manager,
-                                args=(queue, len(urls_general), stream_size_inference, results,))
-    consumer.start()
-    # run the producer
-    producer = threading.Thread(target=producer_manager, args=(queue, predict_resource, arguments,))
-    producer.start()
-    # wait for the producer to finish
-    producer.join()
-    # wait for the consumer to finish
-    consumer.join()
-
-    end = time.time()
-
-    predictions = []
-    for result in results:
-        predictions.append(result)
-
-    total_time = end - start
-    print("Total time:", total_time)
-    print(sys.getsizeof(predictions))
-    print(predictions)
-    return {
-        'statusCode': 200,
-        'body': predictions,
-        'total_time': total_time
-    }
+# def lambda_function(payload, s3_bucket):
+#     predict_resource = PredictResource("/opt/model.pt")
+#     payload = payload["body"]
+#     if isinstance(payload, str):
+#         payload = json.loads(payload)
+#     urls_general = payload["images"]
+#     arguments = []
+#     stream_size_download = payload["download_stream_size"]
+#     stream_size_inference = payload["inference_stream_size"]
+#
+#     for i in range(0, len(urls_general), stream_size_download):
+#         chunk = urls_general[i:i + stream_size_download]
+#         argument = {"images": chunk}
+#         arguments.append(argument)
+#
+#     def producer_task(args):
+#         queue, predict_resource, argument = args
+#         image_datas = load_images(argument, predict_resource)
+#         # push data into queue
+#         for image_data in image_datas:
+#             queue.put(image_data)
+#
+#     # producer manager task
+#     def producer_manager(queue, predict_resource, arguments):
+#         # create thread pool
+#         with concurrent.futures.ThreadPoolExecutor(max_workers=len(arguments)) as executor:
+#             # use threads to generate items and put into the queue
+#             producer_threads = [executor.submit(producer_task, (queue, predict_resource, argument)) for
+#                                 argument in arguments]
+#             for producer_thread in concurrent.futures.as_completed(producer_threads):
+#                 pass
+#         # put a signal to expect no further tasks
+#         queue.put(None)
+#         # report a message
+#         print('>producer_manager done.')
+#
+#     # consumer task
+#     def consumer_task(args):
+#         queue, stream_size_inference = args
+#         while True:
+#             stream = []
+#             for _ in range(stream_size_inference):
+#                 value = queue.get()
+#                 if not value:
+#                     queue.put(value)
+#                     return
+#                 stream.append(value)
+#             result = execute_chunk(stream)
+#             return result
+#
+#     # consumer manager
+#     def consumer_manager(queue, num_images, stream_size_inference, results):
+#         distributions = distribute_number(num_images, stream_size_inference)
+#         # create thread pool
+#         with concurrent.futures.ThreadPoolExecutor(max_workers=len(distributions)) as executor:
+#             consumer_threads = [executor.submit(consumer_task, (queue, distribution)) for distribution in distributions]
+#             # wait for all tasks to complete
+#             for consumer_thread in concurrent.futures.as_completed(consumer_threads):
+#                 pass
+#         for consumer_thread in consumer_threads:
+#             results.append(consumer_thread.result())
+#
+#     def execute_chunk(images_data):
+#         print(f"Inference started.\n")
+#         predictions = predict_resource.predict(images_data)
+#         result = {'predictions': predictions['predictions']}
+#         print(f"Inference finished.\n")
+#         return result
+#
+#     def download_images(argument, predict_resource):
+#         print(f"Download started.\n")
+#         s3_bucket = "off-sample-eu"
+#         images_data = predict_resource.downloadimages(argument["images"], s3_bucket)
+#         print(f"Download finished.\n")
+#         return images_data
+#
+#     def load_images(argument, predict_resource):
+#         print(f"Download started.\n")
+#         s3_bucket = "off-sample"
+#         images_data = predict_resource.downloadimages(argument["images"], s3_bucket)
+#         print(f"Download finished.\n")
+#         return images_data
+#
+#     def distribute_number(number, batch_size):
+#         result = []
+#
+#         while number > 0:
+#             if number >= batch_size:
+#                 result.append(batch_size)
+#                 number -= batch_size
+#             else:
+#                 result.append(number)
+#                 number = 0
+#
+#         return result
+#
+#     def download_images(args):
+#         predict_resource, arguments, stream_size_download, queue = args
+#         arguments = divide_list_into_chunks(arguments, stream_size_download)
+#         for images in arguments:
+#             print(f"Download started: {images}\n")
+#             s3_bucket = "off-sample"
+#             images_data = predict_resource.downloadimages(images, s3_bucket)
+#             print(f"Download  finished.\n")
+#             for image_data in images_data:
+#                 queue.put(image_data)
+#
+#     results = []
+#     start = time.time()
+#     # create the shared queue
+#     queue = Queue()
+#     # run the consumer
+#     consumer = threading.Thread(target=consumer_manager,
+#                                 args=(queue, len(urls_general), stream_size_inference, results,))
+#     consumer.start()
+#     # run the producer
+#     producer = threading.Thread(target=producer_manager, args=(queue, predict_resource, arguments,))
+#     producer.start()
+#     # wait for the producer to finish
+#     producer.join()
+#     # wait for the consumer to finish
+#     consumer.join()
+#
+#     end = time.time()
+#
+#     predictions = []
+#     for result in results:
+#         predictions.append(result)
+#
+#     total_time = end - start
+#     print("Total time:", total_time)
+#     print(sys.getsizeof(predictions))
+#     print(predictions)
+#     return {
+#         'statusCode': 200,
+#         'body': predictions,
+#         'total_time': total_time
+#     }

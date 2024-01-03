@@ -40,32 +40,44 @@ DEFAULT_REQUIREMENTS = [
 
 CUSTOM_REQUIREMENTS = {
     '3.6':[
+        'protobuf',
+        'grpcio',
         'lithops',
         'https://download.pytorch.org/whl/cpu/torch-1.7.1%2Bcpu-cp36-cp36m-linux_x86_64.whl',
         'https://download.pytorch.org/whl/cpu/torchvision-0.8.2%2Bcpu-cp36-cp36m-linux_x86_64.whl',
     ],
     '3.7':[
+        'protobuf',
+        'grpcio',
         'lithops',
         'https://download.pytorch.org/whl/cpu/torch-1.13.1%2Bcpu-cp37-cp37m-linux_x86_64.whl',
         'https://download.pytorch.org/whl/cpu/torchvision-0.14.1%2Bcpu-cp37-cp37m-linux_x86_64.whl',
     ],
     '3.8':[
+        'protobuf',
+        'grpcio',
         'lithops',
         'https://download.pytorch.org/whl/cpu/torch-1.13.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
         'https://download.pytorch.org/whl/cpu/torchvision-0.14.1%2Bcpu-cp38-cp38-linux_x86_64.whl',
     ],
     '3.9':[
+        'protobuf',
+        'grpcio',
         'lithops',
         'https://download.pytorch.org/whl/cpu/torch-2.0.1%2Bcpu-cp39-cp39-linux_x86_64.whl',
         'https://download.pytorch.org/whl/cpu/torchvision-0.15.2%2Bcpu-cp39-cp39-linux_x86_64.whl',
     ],
     '3.10':[
+        'protobuf',
+        'grpcio',
         'lithops',
         'https://download.pytorch.org/whl/cpu/torch-2.0.1%2Bcpu-cp310-cp310-linux_x86_64.whl',
         'https://download.pytorch.org/whl/cpu/torchvision-0.15.2%2Bcpu-cp310-cp310-linux_x86_64.whl',
     ],
     '3.11':[
-        'lithops',
+        'protobuf',
+        'grpcio',
+        'lithops==3.0.0',
         'https://download.pytorch.org/whl/cpu/torch-2.0.1%2Bcpu-cp311-cp311-linux_x86_64.whl',
         'https://download.pytorch.org/whl/cpu/torchvision-0.15.2%2Bcpu-cp311-cp311-linux_x86_64.whl',
     ]

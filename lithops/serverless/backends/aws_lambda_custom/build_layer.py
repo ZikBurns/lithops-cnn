@@ -76,7 +76,7 @@ def install_dependencies(event):
         'jinja*', 'plac*', 'pydantic*',
         'lithops*', 'click*', 'cycler*', 'jmespath*', 'kiwisolver*', 'rsa*', 'seaborn*', 'PyJWT*',
         'requests_oauthlib*', 'oauthlib*', 'packaging*', 'bcrypt*', 'docker*', 'pyasn*', 'websocket_client*',
-        'lxml*', 'PyNaCl*', 'google*', 'paramiko*', 'cryptography*', 'setuptools*', 'jwt*', 'fonttools*',
+        'lxml*', 'PyNaCl*', 'paramiko*', 'cryptography*', 'setuptools*', 'jwt*', 'fonttools*',
         'pandas*', 'test*', '_cffi_backend.cpython-37m-x86_64-linux-gnu.so', 'mpl_toolkits', 'pkg_resources*',
         '*yaml*', '*Yaml*', 'nacl*', 'distutils-precedence.pth', 'matplotlib*', 'pylab*', 'share', 'pycparser*',
         'pyparsing*', 'cachetools*', 'cffi*', '_distutils_hack', 'pytz*', 'kubernetes*', 'ibm*', 'websocket*',

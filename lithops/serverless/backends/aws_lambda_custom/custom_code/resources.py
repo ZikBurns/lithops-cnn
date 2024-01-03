@@ -3,6 +3,7 @@ from lithops.serverless.backends.aws_lambda_custom.custom_code.model import OffS
 import boto3
 import time
 import botocore
+from lithops.serverless.backends.aws_lambda_custom.custom_code.transformations import  transform_images, transform_image, CustomAffineGridSample
 
 
 class PredictResource:
@@ -33,6 +34,19 @@ class PredictResource:
                 object_data = response['Body'].read()
                 images_data.append(object_data)
         return images_data
+        
+    def downloadimage(self, key,s3_bucket):
+        response = self.s3_client.get_object(Bucket=s3_bucket, Key=key)
+        object_data = response['Body'].read()
+        return object_data
+            
+    def transform_images(self, images):
+        return transform_images(images)
+
+
+    def transform_image(self, image):
+        return transform_image(image)
+
 
     def predict(self, images):
         probs, labels = self.model.predict(images)
