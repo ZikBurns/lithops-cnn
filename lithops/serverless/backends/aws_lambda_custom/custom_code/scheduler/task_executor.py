@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional
 
 import numpy as np
@@ -7,6 +8,8 @@ from .torchscript_ensemble import ModelEnsemble
 from torch.multiprocessing import Queue
 
 logger = logging.getLogger()
+
+
 class TaskExecutor:
     def __init__(
             self,
@@ -21,6 +24,7 @@ class TaskExecutor:
             function: callable,
             interop: int,
             intraop: int,
+            time_log_file: str
     ):
         # Constructs a TaskExecutor with its function and parallelization configuration
         self.batch_size = batch_size
@@ -45,11 +49,7 @@ class TaskExecutor:
             self.nworkers = self.max_concurrency
         else:
             self.nworkers = n_models
-
-
-
-
-
+        self.time_log_file = time_log_file
 
     def call_inner_function(self, dicts: dict) -> dict:
         # Calls function in executor. If torchscript mode, call also ends the executor (puts None in input_queue).
@@ -65,27 +65,28 @@ class TaskExecutor:
         # Checks if batch has the expected format for this executor
         if self.batch_format and isinstance(value, self.batch_format):
             return True
-        elif self.batch_format==None and value==None:
+        elif self.batch_format == None and value == None:
             return True
         else:
             raise Exception(f"Object of type {self.batch_format} expected, but got {type(value)}")
-
-
 
     def dequeue_dicts(self, process_id) -> dict:
         # Dequeues dictionary and checks if format is valid
         dequeued_dicts = {}
         for _ in range(self.batch_size):
-            if self.ens and self.input_queue.mode=="OutputPipeQueue":
+            if self.ens and self.input_queue.mode == "OutputPipeQueue":
                 image_dict = self.input_queue.queue.get_any()
             else:
                 image_dict = self.input_queue.get(process_id)
 
             if not image_dict:
+                # print(f"{self.function.__name__} - Dequeued None")
                 return dequeued_dicts, True
+
             try:
 
                 for key, value in image_dict.items():
+                    # print(f"{self.function.__name__} - Dequeued {key}")
                     self.valid_type_check(value)
                     if isinstance(value, np.ndarray):
                         tensor = torch.from_numpy(value)
@@ -93,11 +94,12 @@ class TaskExecutor:
                 dequeued_dicts.update(image_dict)
             except Exception as e:
                 if isinstance(value, Exception):
-                    logger.error(f"{self.function.__name__} - Exception from previous task found, passing {key} to the next")
+                    logger.error(
+                        f"{self.function.__name__} - Exception from previous task found, passing {key} to the next")
                     self.output_queue.put({key: value}, process_id)
                 else:
                     logger.error(f"{self.function.__name__} - Error during type check. {e}")
-                    self.output_queue.put({key: e},process_id)
+                    self.output_queue.put({key: e}, process_id)
 
         return dequeued_dicts, False
 
@@ -108,9 +110,9 @@ class TaskExecutor:
     def set_interop_threads(self):
         # If interop_threads was not set before, set it with torch.set_num_interop_threads()
         if self.interop and not self.interop_set:
-                torch.set_num_interop_threads(self.interop)
-                logger.info(f"Interop threads set to {self.interop} from now on.")
-                self.interop_set=True
+            torch.set_num_interop_threads(self.interop)
+            logger.info(f"Interop threads set to {self.interop} from now on.")
+            self.interop_set = True
 
     def update_queue_counter(self):
         if self.output_queue.isInputPipeQueue():
@@ -118,11 +120,20 @@ class TaskExecutor:
                 self.output_queue.queue.counter += 1
                 if self.output_queue.queue.counter == self.nworkers:
                     self.output_queue.queue.stop()
+        elif self.output_queue.isQueue():
+            with self.output_queue.queue.counter_lock:
+                self.output_queue.queue.counter += 1
+                # print(f"{self.function.__name__} - Closed : {self.output_queue.queue.counter}")
+                if self.output_queue.queue.counter == self.nworkers:
+                    # print(f"{self.function.__name__} - Putting None in output queue : {self.nworkers}")
+                    self.output_queue.put(None)
+
     def __initialize_ens(self):
         if self.jit_model and self.n_models:
             lstm = ModelEnsemble(model=self.jit_model, n_models=self.n_models)
             self.ens = torch.jit.script(lstm)
-    def execute(self, process_id: int=None):
+
+    def execute(self, process_id: int = None):
         # Dequeues batch_size times, executes the batch and enqueues in the next queue.
         self.set_intraop_threads()
         self.set_interop_threads()
@@ -135,23 +146,39 @@ class TaskExecutor:
                     self.update_queue_counter()
                     return
             try:
+
+                # save in log file
+                if self.time_log_file:
+                    with open(self.time_log_file, 'a') as f:
+                        f.write(f"{self.function.__name__},started,{time.time()}\n")
+
                 results = self.call_inner_function(dequeued_dicts)
 
+                if self.time_log_file:
+                    with open(self.time_log_file, 'a') as f:
+                        f.write(f"{self.function.__name__},finished,{time.time()}\n")
+
+
                 for key, value in results.items():
-                    if torch.is_tensor(value):
-                        value = value.numpy()
-                    self.output_queue.put({key: value}, process_id)
+                    if not self.ens:
+                        if torch.is_tensor(value):
+                            value = value.numpy()
+                        # print(f"{self.function.__name__} - Putting {key} in output queue")
+                        self.output_queue.put({key: value}, process_id)
+
                 if self.ens:
-                    return
+                    return results
+
                 if last:
                     self.input_queue.put(None)
                     self.update_queue_counter()
                     return
 
-
             except Exception as e:
                 logger.error(f"Error executing task {self.function.__name__}. {e}")
+                print(f"Error executing task {self.function.__name__}. {e}")
                 logger.error(f" Affected inputs:")
                 for key, value in dequeued_dicts.items():
                     logger.error(f"{key}")
                     self.output_queue.put({key: e}, process_id)
+

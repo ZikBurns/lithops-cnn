@@ -14,7 +14,7 @@ class FlexQueue:
         elif mode=="OutputPipeQueue":
             self.queue = OutputPipeQueue(num_pipes)
         else:
-            self.queue = queue.Queue()
+            self.queue = TheadingQueue()
         self.closed = False
 
     def reopen(self):
@@ -106,6 +106,29 @@ class FlexQueue:
     def close(self):
         self.closed=True
         self.queue.close()
+
+
+class TheadingQueue:
+    def __init__(self):
+        self.queue = queue.Queue()
+        self.counter = 0
+        self.counter_lock = threading.Lock()
+
+    def put(self, item):
+        self.queue.put(item)
+
+    def get(self):
+        return self.queue.get()
+
+    def get_nowait(self):
+        return self.queue.get_nowait()
+
+    def empty(self):
+        return self.queue.empty()
+
+    def close(self):
+        pass
+
 
 
 

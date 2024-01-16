@@ -10,11 +10,12 @@ import logging
 from .task_executor import TaskExecutor
 from .constants import VALID_BATCH_FORMATS, VALID_BATCH_FORMATS_NAMES
 from .pipequeue import FlexQueue
+import time
 
 logger = logging.getLogger()
 
 class TaskScheduler:
-    def __init__(self, config_file="config.yml", config_dict=None, logging_level=logging.INFO):
+    def __init__(self, config_file="config.yml", config_dict=None, logging_level=logging.INFO, time_log_file=None):
         """ Construct a TaskScheduler and load the configuration file or dictionary.
         If both dictionary and config file are set, the file will be ignored.
 
@@ -57,9 +58,7 @@ class TaskScheduler:
         self.config_dict=config_dict
         self.logging_level=logging_level
         self.first_run = True
-
-
-
+        self.time_log_file = time_log_file
 
 
     def task(
@@ -270,7 +269,7 @@ class TaskScheduler:
                             input_queue = task_executor.output_queue
                             output_queue = FlexQueue()
                         task_executor = TaskExecutor(_batch_size, _batch_format, _max_concurrency, _num_cpus, _n_models,
-                                                     jit_model, input_queue, output_queue, func, _interop, _intraop)
+                                                     jit_model, input_queue, output_queue, func, _interop, _intraop, self.time_log_file)
                         self.task_executors.insert(task_index + 1, task_executor)
                         created = True
                 if not created:
@@ -283,7 +282,7 @@ class TaskScheduler:
                     input_queue = FlexQueue()
                     output_queue = FlexQueue()
                 task_executor = TaskExecutor(_batch_size, _batch_format, _max_concurrency, _num_cpus, _n_models,
-                                             jit_model, input_queue, output_queue, func, _interop, _intraop)
+                                             jit_model, input_queue, output_queue, func, _interop, _intraop, self.time_log_file)
                 self.task_executors.append(task_executor)
 
             return func
@@ -302,6 +301,7 @@ class TaskScheduler:
         # Empty all queues in the provided list of queues
         for queue in queues:
             if queue.isQueue():
+                queue.queue.counter = 0
                 while not queue.empty():
                     try:
                         queue.get_nowait()
@@ -309,9 +309,6 @@ class TaskScheduler:
                         break
             elif queue.closed:
                 queue.reopen()
-
-
-
 
 
     def __launch_threads(self, tasks_threading):
@@ -339,9 +336,9 @@ class TaskScheduler:
     def __launch_torchscript(self, tasks_torchscript, num_inputs):
         # Launch TorchScript tasks
         for task_executor in tasks_torchscript:
-            if not task_executor.batch_size:
-                task_executor.batch_size = num_inputs
-            task_executor.execute()
+            task_executor.batch_size = num_inputs
+            results = task_executor.execute()
+            return results
 
     def __dequeue_queue(self, queue, num_outputs):
         # Dequeue results from a queue and return them as a dictionary
@@ -361,11 +358,11 @@ class TaskScheduler:
         self.thread_executor.shutdown()
 
 
-
-
-    def __update_config(self, config_dict: dict):
+    def __update_config(self, config_dict: dict, time_log_file=None):
+        self.time_log_file = time_log_file
         for key, value in config_dict.items():
             for executor in self.task_executors:
+
                 if executor.function.__name__ == key:
                     for key_config, value_config in value.items():
                         if value_config and value_config>0:
@@ -400,21 +397,35 @@ class TaskScheduler:
                                 executor.interop = value_config
                                 logger.info(f"Task {executor.function.__name__} - interop set to {value_config}")
 
-    def process_tasks(self, input_dict: dict, config_dict: dict=None) -> dict:
+
+    def process_tasks(self, input_dict: dict, config_dict: dict=None, time_log_file=None) -> dict:
         """ Executes the Scheduler witht the tasks that were set before
 
         :param input_dict: Dictionary with {key:value} where value must be a VALID_BATCH_FORMATS from constants.py
         :return: Dictionary with the key set in the input_dict and value the result after all the task execution
         """
+        self.benchmarks = []
+        start_time = time.time()
+        if time_log_file:
+            self.time_log_file=time_log_file
+            for executor in self.task_executors:
+                executor.time_log_file = time_log_file
         if not self.first_run:
             self.shutdown_executors()
             self.thread_executor = concurrent.futures.ThreadPoolExecutor()
 
         if config_dict:
-            self.__update_config(config_dict)
+            self.__update_config(config_dict, time_log_file)
 
         # Get all queues from task_executors and order them in execution order
         queues = self.__get_ordered_queues()
+
+        # If it doesn't exist, create folder of time logs. Extract the folder from the time_log_file
+        if time_log_file:
+            if not os.path.exists(os.path.dirname(self.time_log_file)):
+                os.makedirs(os.path.dirname(self.time_log_file))
+            with open(self.time_log_file, 'w+') as f:
+                f.write(f"start,,{time.time()}\n")
 
         # Reset the queues
         self.__empty_queues(queues)
@@ -441,6 +452,7 @@ class TaskScheduler:
             elif task_executor.ens:
                 tasks_torchscript.append(task_executor)
 
+
         # Set the max_workers of the process and thread executors
         if self.thread_executor:
             self.thread_executor._max_workers = total_threads
@@ -451,7 +463,8 @@ class TaskScheduler:
 
         # Enqueue the input dictionary in the first queue of the pipeline
         self.__enqueue_queue(queues[0], input_dict)
-
+        # print("putting none")
+        self.task_executors[0].input_queue.put(None)
         # For every task executor that is either multiprocessing or threading
         for task_executor in self.task_executors:
             if task_executor.num_cpus:
@@ -460,19 +473,21 @@ class TaskScheduler:
 
                 # Execute one time in main process
                 task_executor.execute(-1)
+                self.benchmarks.append(time.time() - start_time)
+                start_time = time.time()
 
             if task_executor.max_concurrency:
-                # None task is put to end processes/threads when finished enqueuing
-                task_executor.input_queue.put(None)
-
                 # Execute one time in main process
                 task_executor.execute()
+                self.benchmarks.append(time.time() - start_time)
+                start_time = time.time()
 
         # Execute
-        self.__launch_torchscript(tasks_torchscript, len(input_dict))
+        results = self.__launch_torchscript(tasks_torchscript, len(input_dict))
+        if not results:
+            results = self.__dequeue_queue(queues[len(queues) - 1], len(input_dict))
 
-        results = self.__dequeue_queue(queues[len(queues) - 1], len(input_dict))
-
+        self.benchmarks.append(time.time() - start_time)
         for task_executor in self.task_executors:
             if task_executor.num_cpus:
                 task_executor.input_queue.close()
@@ -485,6 +500,9 @@ class TaskScheduler:
 
         self.shutdown_executors()
         self.first_run = False
+        if self.time_log_file:
+            with open(self.time_log_file, 'a') as f:
+                f.write(f"end,,{time.time()}\n")
         return results
 
 
@@ -500,3 +518,58 @@ class TaskScheduler:
         file_name = re.sub(r'[/\\:*?"<>|{}]', '', string_file_name)
         file_name = file_name.replace(",","")
         return file_name
+
+    def get_monitoring_times(self):
+        if self.time_log_file:
+            with open(self.time_log_file, 'r') as file:
+                lines = file.readlines()
+
+            times = {'total': 0.0, 'load': 0.0, 'transform': 0.0, 'predict': 0.0}
+
+            # Variables per emmagatzemar els temps inicials i finals de cada fase
+            start_time = 0
+            load_start_times = []
+            load_finished_times = []
+            preprocess_start_times = []
+            preprocess_finished_times = []
+            predict_start_times = []
+            predict_finished_times = []
+
+            # Processar cada línia del fitxer
+            for line in lines:
+                parts = line.strip().split(',')
+                action = parts[0]
+                status = parts[1]
+                timestamp = float(parts[2])
+
+                if action == 'start':
+                    start_time = timestamp
+                elif action == 'load' and status == 'started':
+                    load_start_times.append(timestamp)
+                elif action == 'load' and status == 'finished':
+                    load_finished_times.append(timestamp)
+                elif action == 'preprocess' and status == 'started':
+                    preprocess_start_times.append(timestamp)
+                elif action == 'preprocess' and status == 'finished':
+                    preprocess_finished_times.append(timestamp)
+                elif action == 'predict' and status == 'started':
+                    predict_start_times.append(timestamp)
+                elif action == 'predict' and status == 'finished':
+                    predict_finished_times.append(timestamp)
+                elif action == 'end':
+                    times['total'] = timestamp - start_time
+                    times['load'] = sum(load_finished_times) / len(load_finished_times) - sum(load_start_times) / len(
+                        load_start_times)
+                    times['transform'] = sum(preprocess_finished_times) / len(preprocess_finished_times) - sum(
+                        preprocess_start_times) / len(preprocess_start_times)
+                    times['predict'] = sum(predict_finished_times) / len(predict_finished_times) - sum(
+                        predict_start_times) / len(predict_start_times)
+
+            return times['load'], times['transform'], times['predict']
+        else:
+            return None, None, None
+    
+    def get_log_file_content(self):
+        if self.time_log_file:
+            with open(self.time_log_file, 'r') as file:
+                return file.read()

@@ -14,41 +14,42 @@ import logging
 import grpc
 from lithops.serverless.backends.aws_lambda_custom.custom_code.grpc_assets import urlrpc_pb2
 from lithops.serverless.backends.aws_lambda_custom.custom_code.grpc_assets import urlrpc_pb2_grpc
+import socket
 
 jit_model = torch.jit.load("/opt/model.pt", torch.device('cpu'))
 resources = PredictResource("/opt/model.pt")
-S3_BUCKET = "off-sample"
+S3_BUCKET="off-sample"
 config_dict = {
-    'load': {'batch_size': 0, 'max_concurrency': 0},
-    'preprocess': {'batch_size': 0, 'num_cpus': 0},
-    'predict': {'interop': 0, 'intraop': 0, 'n_models': 0}
+               'load': {'batch_size': 0, 'max_concurrency': 0},
+               'preprocess': {'batch_size': 0, 'num_cpus': 0},
+               'predict': {'interop':0, 'intraop': 0, 'n_models': 0}
 }
-inferencer = TaskScheduler(config_dict=config_dict, logging_level=logging.WARNING)
-
+inferencer = TaskScheduler(config_dict=config_dict, logging_level=logging.INFO)
 
 @inferencer.task(mode="threading")
 def load(image_dict):
     result_dict = {}
     for key in image_dict:
-        # print("Donwloading image", key)
+        print("Donwloading image", key)
         image_data = resources.downloadimage(key, S3_BUCKET)
-        # print("Donwloaded image", key)
+        print("Donwloaded image", key)
         result_dict.update({key: image_data})
     return result_dict
 
-
 @inferencer.task(mode="multiprocessing", previous=load, batch_format="bytes")
 def preprocess(image_dict):
+    
     result_dict = {}
     for key, value in image_dict.items():
+        print("Transformation started", key)
         tensor = resources.transform_image(value)
         result_dict.update({key: tensor})
-    # print("Transformation finished")
+        print("Transformation finished", key)
     return result_dict
-
 
 @inferencer.task(mode="torchscript", previous=preprocess, batch_format="tensor", jit_model=jit_model)
 def predict(tensor_dicts, ensemble):
+    print("Predicting images")
     tensors = []
     for key, value in tensor_dicts.items():
         tensors.append(value)
@@ -60,67 +61,80 @@ def predict(tensor_dicts, ensemble):
 
 
 def lambda_function(payload, s3_bucket):
+    try:
+        # Try to connect to a well-known external host
+        socket.create_connection(("www.google.com", 80), timeout=5)
+        print("Internet access available")
+    except Exception as e:
+        print(f"Error: {e}")
+        print("No internet access")
     payload = payload["body"]
     if isinstance(payload, str):
         payload = json.loads(payload)
     print(payload)
-
-    S3_BUCKET = s3_bucket
-
+    
+    S3_BUCKET=s3_bucket
+    
     if "WARM_START_FLAG" in os.environ:
         is_cold_start = False
     else:
         is_cold_start = True
         os.environ["WARM_START_FLAG"] = "True"
 
+
     if 'config' in payload.keys():
         config_dict = payload["config"]
-    print("Scheduler defined")
+    
+    
+    if 'grpc_port' in payload:
+        port = payload['grpc_port']
+        print("gRPC connecting to", port)
+        rpc_dict = urlrpc_pb2.Dict(key="", value="")
+        channel = grpc.insecure_channel(f'10.0.139.248:{port}')
+        stub = urlrpc_pb2_grpc.URLRPCStub(channel)
+        all_results = []
+        batch = 1
+        rpc_dict = urlrpc_pb2.Dict(key="", value="")
+        finished_urls = [rpc_dict]
+        while batch:
+            response = stub.Add(urlrpc_pb2.urlRequest(finished=finished_urls))
+            finished_urls = []
+            print(response.urls)
+            batch = response.urls
+            if batch:
+                url_dicts = {}
+                for url in batch:
+                    url_dicts.update({url: None})
+                prediction_dicts = inferencer.process_tasks(url_dicts, config_dict)
+                for key, result in prediction_dicts.items():
+                    rpc_dict = urlrpc_pb2.Dict(key=key, value=str(result))
+                    all_results.append({key: str(result)})
+                    finished_urls.append(rpc_dict)
+        result = {'predictions': all_results}
+    else:
+        print("Scheduler defined")
+        batch = payload['images']
+        url_dicts = {}
+        for url in batch:
+            url_dicts.update({url: None})
+        print("Processing ")
+        prediction_dicts = inferencer.process_tasks(url_dicts, config_dict,'/tmp/time_log.txt')
+        time_log = inferencer.get_log_file_content()
 
-    port = payload['grpc_port']
-    print("gRPC connecting to", port)
-    rpc_dict = urlrpc_pb2.Dict(key="", value="")
-    channel = grpc.insecure_channel(f'10.0.7.143:{port}')
-    stub = urlrpc_pb2_grpc.URLRPCStub(channel)
-    all_results = []
-    batch = 1
-    rpc_dict = urlrpc_pb2.Dict(key="", value="")
-    finished_urls = [rpc_dict]
-    while batch:
-        response = stub.Add(urlrpc_pb2.urlRequest(finished=finished_urls))
-        finished_urls = []
-        print(response.urls)
-        batch = response.urls
-        if batch:
-            url_dicts = {}
-            for url in batch:
-                url_dicts.update({url: None})
-            prediction_dicts = inferencer.process_tasks(url_dicts, config_dict)
-            for key, result in prediction_dicts.items():
-                rpc_dict = urlrpc_pb2.Dict(key=key, value=str(result))
-                all_results.append({key: str(result)})
-                finished_urls.append(rpc_dict)
-    result = {'predictions': all_results}
-
-    # batch = payload['images']
-    # url_dicts = {}
-    # for url in batch:
-    #     url_dicts.update({url: None})
-
-    # prediction_dicts = inferencer.process_tasks(url_dicts)
-    # print("Finished tasks")
-    # grpc_results = []
-    # result_dicts = {}
-    # for key, result in prediction_dicts.items():
-    #     rpc_dict = urlrpc_pb2.Dict(key=key, value=str(result))
-    #     result_dicts.update({key: str(result)})
-    #     grpc_results.append(rpc_dict)
-    # result = {'predictions': result_dicts}
-    # print(result)
+        print("Finished tasks")
+        grpc_results = []
+        result_dicts = {}
+        for key, result in prediction_dicts.items():
+            rpc_dict = urlrpc_pb2.Dict(key=key, value=str(result))
+            result_dicts.update({key: str(result)})
+            grpc_results.append(rpc_dict)
+        result = {'predictions': result_dicts}
+        print(result)
 
     return {
         'statusCode': 200,
-        'body': result
+        'body': result,
+        'time_log': time_log
     }
 
 
