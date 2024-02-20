@@ -1,5 +1,5 @@
 import json
-from lithops.serverless.backends.aws_lambda_custom.custom_code.resources import PredictResource
+from lithops.serverless.backends.aws_lambda_custom_image.custom_code.resources import PredictResource
 import time
 import concurrent.futures
 import threading
@@ -8,19 +8,19 @@ from queue import Queue
 import concurrent
 import torch
 import os
-from lithops.serverless.backends.aws_lambda_custom.custom_code.scheduler.task_scheduler import TaskScheduler
-from lithops.serverless.backends.aws_lambda_custom.custom_code.model import OffSampleTorchscriptFork
+from lithops.serverless.backends.aws_lambda_custom_image.custom_code.scheduler.task_scheduler import TaskScheduler
+from lithops.serverless.backends.aws_lambda_custom_image.custom_code.model import OffSampleTorchscriptFork
 import logging
 import grpc
-from lithops.serverless.backends.aws_lambda_custom.custom_code.grpc_assets import urlrpc_pb2
-from lithops.serverless.backends.aws_lambda_custom.custom_code.grpc_assets import urlrpc_pb2_grpc
+from lithops.serverless.backends.aws_lambda_custom_image.custom_code.grpc_assets import urlrpc_pb2
+from lithops.serverless.backends.aws_lambda_custom_image.custom_code.grpc_assets import urlrpc_pb2_grpc
 import socket
 import boto3 
 
 
 
-jit_model = torch.jit.load("/opt/model.pt", torch.device('cpu'))
-resources = PredictResource("/opt/model.pt")
+jit_model = torch.jit.load("/function/bin/model.pt", torch.device('cpu'))
+resources = PredictResource()
 
 S3_BUCKET="off-sample-eu"
 config_dict = {
@@ -135,11 +135,6 @@ def lambda_function(payload, s3_bucket):
     if isinstance(payload, str):
         payload = json.loads(payload)
     print(payload)
-    
-    
-    
-    
-
 
     if 'config' in payload.keys():
         config_dict = payload["config"]

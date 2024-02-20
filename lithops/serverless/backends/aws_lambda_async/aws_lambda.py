@@ -21,19 +21,19 @@ import time
 import json
 import zipfile
 import subprocess
+import pickle
 import botocore.exceptions
 import base64
-
 from botocore.httpsession import URLLib3Session
 from botocore.awsrequest import AWSRequest
 from botocore.auth import SigV4Auth
-
 from lithops import utils
 from lithops.version import __version__
 from lithops.constants import COMPUTE_CLI_MSG
-
 from . import config
-
+from lithops.default_function import default_function
+from lithops.job.job import _store_func_and_modules
+from lithops.job.serialize import SerializeIndependent
 logger = logging.getLogger(__name__)
 
 LITHOPS_FUNCTION_ZIP = 'lithops_lambda.zip'
@@ -51,7 +51,7 @@ class AWSLambdaBackend:
         """
         logger.debug('Creating AWS Lambda client')
 
-        self.name = 'aws_lambda'
+        self.name = 'aws_lambda_async'
         self.type = 'faas'
         self.lambda_config = lambda_config
         self.internal_storage = internal_storage
@@ -92,6 +92,7 @@ class AWSLambdaBackend:
 
         msg = COMPUTE_CLI_MSG.format('AWS Lambda')
         logger.info(f"{msg} - Region: {self.region_name}")
+
 
     def _format_function_name(self, runtime_name, runtime_memory, version=__version__):
         runtime_name = runtime_name.replace('/', '__').replace('.', '').replace(':', '--')
@@ -341,6 +342,14 @@ class AWSLambdaBackend:
         """
         logger.info(f'Building runtime {runtime_name} from {runtime_file}')
 
+        # Pickle function default_function and save in tmp/func.pickle
+        serializer = SerializeIndependent([['PIL', True], ['__future__', False], ['__hello__', False], ['__phello__', True], ['_aix_support', False], ['_asyncio', False], ['_bisect', False], ['_blake2', False], ['_bootsubprocess', False], ['_bz2', False], ['_codecs_cn', False], ['_codecs_hk', False], ['_codecs_iso2022', False], ['_codecs_jp', False], ['_codecs_kr', False], ['_codecs_tw', False], ['_collections_abc', False], ['_compat_pickle', False], ['_compression', False], ['_contextvars', False], ['_crypt', False], ['_csv', False], ['_ctypes', False], ['_ctypes_test', False], ['_curses', False], ['_curses_panel', False], ['_datetime', False], ['_dbm', False], ['_decimal', False], ['_distutils_hack', True], ['_elementtree', False], ['_gdbm', False], ['_hashlib', False], ['_heapq', False], ['_json', False], ['_lsprof', False], ['_lzma', False], ['_markupbase', False], ['_md5', False], ['_multibytecodec', False], ['_multiprocessing', False], ['_opcode', False], ['_osx_support', False], ['_pickle', False], ['_posixshmem', False], ['_posixsubprocess', False], ['_py_abc', False], ['_pydecimal', False], ['_pyio', False], ['_queue', False], ['_random', False], ['_sha1', False], ['_sha256', False], ['_sha3', False], ['_sha512', False], ['_sitebuiltins', False], ['_socket', False], ['_sqlite3', False], ['_ssl', False], ['_statistics', False], ['_strptime', False], ['_struct', False], ['_sysconfigdata__linux_x86_64-linux-gnu', False], ['_testbuffer', False], ['_testcapi', False], ['_testclinic', False], ['_testimportmultiple', False], ['_testinternalcapi', False], ['_testmultiphase', False], ['_threading_local', False], ['_tkinter', False], ['_typing', False], ['_uuid', False], ['_weakrefset', False], ['_xxsubinterpreters', False], ['_xxtestfuzz', False], ['_zoneinfo', False], ['abc', False], ['aifc', False], ['antigravity', False], ['argparse', False], ['array', False], ['ast', False], ['asynchat', False], ['asyncio', True], ['asyncore', False], ['audioop', False], ['awslambdaric', True], ['base64', False], ['bdb', False], ['binascii', False], ['bisect', False], ['boto3', True], ['botocore', True], ['bz2', False], ['cProfile', False], ['calendar', False], ['certifi', True], ['cgi', False], ['cgitb', False], ['charset_normalizer', True], ['chunk', False], ['cloudpickle', True], ['cmath', False], ['cmd', False], ['code', False], ['codecs', False], ['codeop', False], ['collections', True], ['colorsys', False], ['compileall', False], ['concurrent', True], ['configparser', False], ['contextlib', False], ['contextvars', False], ['copy', False], ['copyreg', False], ['crypt', False], ['csv', False], ['ctypes', True], ['curses', True], ['dataclasses', False], ['datetime', False], ['dateutil', True], ['dbm', True], ['decimal', False], ['difflib', False], ['dis', False], ['distutils', True], ['doctest', False], ['email', True], ['encodings', True], ['ensurepip', True], ['enum', False], ['fcntl', False], ['filecmp', False], ['fileinput', False], ['filelock', True], ['fnmatch', False], ['fractions', False], ['ftplib', False], ['functools', False], ['functorch', True], ['genericpath', False], ['getopt', False], ['getpass', False], ['gettext', False], ['glob', False], ['graphlib', False], ['grp', False], ['grpc', True], ['gzip', False], ['handler', True], ['hashlib', False], ['heapq', False], ['hmac', False], ['html', True], ['http', True], ['httplib2', True], ['idlelib', True], ['idna', True], ['imaplib', False], ['imghdr', False], ['imp', False], ['importlib', True], ['inspect', False], ['io', False], ['ipaddress', False], ['isympy', False], ['jinja2', True], ['jmespath', True], ['json', True], ['kafka', True], ['keyword', False], ['lib2to3', True], ['linecache', False], ['lithops', True], ['locale', False], ['logging', True], ['lzma', False], ['mailbox', False], ['mailcap', False], ['markupsafe', True], ['math', False], ['mimetypes', False], ['mmap', False], ['modulefinder', False], ['mpmath', True], ['multiprocessing', True], ['netrc', False], ['networkx', True], ['nis', False], ['nntplib', False], ['ntpath', False], ['nturl2path', False], ['numbers', False], ['numpy', True], ['opcode', False], ['operator', False], ['optparse', False], ['os', False], ['ossaudiodev', False], ['pandas', True], ['pathlib', False], ['pdb', False], ['pickle', False], ['pickletools', False], ['pika', True], ['pip', True], ['pipes', False], ['pkg_resources', True], ['pkgutil', False], ['platform', False], ['plistlib', False], ['poplib', False], ['posixpath', False], ['pprint', False], ['profile', False], ['ps_mem', False], ['pstats', False], ['psutil', True], ['pty', False], ['py_compile', False], ['pyclbr', False], ['pydoc', False], ['pydoc_data', True], ['pyexpat', False], ['pyparsing', True], ['pytz', True], ['queue', False], ['quopri', False], ['random', False], ['re', True], ['readline', False], ['redis', True], ['reprlib', False], ['requests', True], ['resource', False], ['rlcompleter', False], ['runpy', False], ['runtime_client', False], ['s3transfer', True], ['sched', False], ['scipy', True], ['secrets', False], ['select', False], ['selectors', False], ['setuptools', True], ['shelve', False], ['shlex', False], ['shutil', False], ['signal', False], ['simplejson', True], ['site', False], ['six', False], ['smtpd', False], ['smtplib', False], ['sndhdr', False], ['socket', False], ['socketserver', False], ['spwd', False], ['sqlite3', True], ['sre_compile', False], ['sre_constants', False], ['sre_parse', False], ['ssl', False], ['stat', False], ['statistics', False], ['string', False], ['stringprep', False], ['struct', False], ['subprocess', False], ['sunau', False], ['sympy', True], ['symtable', False], ['sysconfig', False], ['syslog', False], ['tabnanny', False], ['tarfile', False], ['tblib', True], ['telnetlib', False], ['tempfile', False], ['termios', False], ['textwrap', False], ['this', False], ['threading', False], ['timeit', False], ['tkinter', True], ['token', False], ['tokenize', False], ['tomllib', True], ['torch', True], ['torchgen', True], ['torchvision', True], ['trace', False], ['traceback', False], ['tracemalloc', False], ['tty', False], ['turtle', False], ['turtledemo', True], ['types', False], ['typing', False], ['typing_extensions', False], ['tzdata', True], ['unicodedata', False], ['unittest', True], ['urllib', True], ['urllib3', True], ['uu', False], ['uuid', False], ['venv', True], ['warnings', False], ['wave', False], ['weakref', False], ['webbrowser', False], ['wheel', True], ['wsgiref', True], ['xdrlib', False], ['xml', True], ['xmlrpc', True], ['xxlimited', False], ['xxlimited_35', False], ['zipapp', False], ['zipfile', False], ['zipimport', False], ['zlib', False], ['zoneinfo', True], ['lithops', True]])
+        func_and_data_ser, mod_paths = serializer([default_function], set(), set())
+        func_str = func_and_data_ser[0]
+
+        pickled_default_function = pickle.dumps(default_function)
+        _store_func_and_modules(".", "func.pickle", func_str, {} )
+
         docker_path = utils.get_docker_path()
         if runtime_file:
             assert os.path.isfile(runtime_file), f'Cannot locate "{runtime_file}"'
@@ -467,7 +476,7 @@ class AWSLambdaBackend:
             images = response['imageDetails']
             if not images:
                 raise Exception(f'Runtime {runtime_name} is not present in ECR.'
-                                'Consider running "lithops runtime build -b aws_lambda ..."')
+                                'Consider running "lithops runtime build -b aws_lambda_async ..."')
             image = list(filter(lambda image: 'imageTags' in image and tag in image['imageTags'], images)).pop()
             image_digest = image['imageDigest']
         except botocore.exceptions.ClientError:
@@ -675,6 +684,39 @@ class AWSLambdaBackend:
         #     else:
         #         raise Exception(response)
 
+    def invoke_sync(self, runtime_name, runtime_memory, payload):
+        """
+        Invoke lambda function asynchronously
+        @param runtime_name: name of the runtime
+        @param runtime_memory: memory of the runtime in MB
+        @param payload: invoke dict payload
+        @return: invocation ID
+        """
+        # print("Starting invocation", payload)
+        function_name = self._format_function_name(runtime_name, runtime_memory)
+        payload['sync_invoker'] = True
+        # return None
+        # Save payload into json file
+        payload = json.dumps(payload, default=str)
+        print("Payload", payload)
+        try:
+            response = self.lambda_client.invoke(
+                FunctionName=function_name,
+                Payload=payload
+            )
+            if response['StatusCode'] == 200:
+                return json.loads(response['Payload'].read().decode('utf-8'))
+            else:
+                logger.debug(response)
+                if response['ResponseMetadata']['HTTPStatusCode'] == 401:
+                    raise Exception('Unauthorized - Invalid API Key')
+                elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
+                    raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
+                else:
+                    raise Exception(response)
+        except Exception as e:
+            # Reached the maximum number of attempts, raise an exception or perform any other action
+            raise Exception(f"Failed to invoke function: {e}")
 
     def get_runtime_key(self, runtime_name, runtime_memory, version=__version__):
         """

@@ -23,14 +23,16 @@ import zipfile
 import subprocess
 import botocore.exceptions
 import base64
-
+from urllib.request import urlopen
+# import aiobotocore
 from botocore.httpsession import URLLib3Session
 from botocore.awsrequest import AWSRequest
 from botocore.auth import SigV4Auth
-
+# import asyncio
 from lithops import utils
 from lithops.version import __version__
 from lithops.constants import COMPUTE_CLI_MSG
+# from aiobotocore.session import get_session
 
 from . import config
 
@@ -51,13 +53,13 @@ class AWSLambdaBackend:
         """
         logger.debug('Creating AWS Lambda client')
 
-        self.name = 'aws_lambda'
+        self.name = 'aws_lambda_default'
         self.type = 'faas'
         self.lambda_config = lambda_config
         self.internal_storage = internal_storage
         self.user_agent = lambda_config['user_agent']
 
-        self.user_key = lambda_config['access_key_id'][-4:].lower()
+        self.user_key = "image"
         self.package = f'lithops_v{__version__.replace(".", "-")}_{self.user_key}'
         self.region_name = lambda_config['region']
         self.role_arn = lambda_config['execution_role']
@@ -71,15 +73,34 @@ class AWSLambdaBackend:
             region_name=self.region_name
         )
 
+
         self.lambda_client = self.aws_session.client(
             'lambda', region_name=self.region_name,
             config=botocore.client.Config(
+                max_pool_connections=50000,
+                read_timeout=900,
+                connect_timeout=900,
                 user_agent_extra=self.user_agent
             )
         )
 
+        # async def create_client():
+        #     session = get_session()
+        #     client = session.create_client(
+        #         'lambda',
+        #         aws_access_key_id=lambda_config['access_key_id'],
+        #         aws_secret_access_key=lambda_config['secret_access_key'],
+        #         aws_session_token=lambda_config.get('session_token'),
+        #         region_name=self.region_name
+        #     )
+        #     return client
+        #
+        # loop = asyncio.get_event_loop()
+        # client = loop.run_until_complete(create_client())
+
+
         self.credentials = self.aws_session.get_credentials()
-        self.session = URLLib3Session()
+        self.session = URLLib3Session(max_pool_connections=5000)
         self.host = f'lambda.{self.region_name}.amazonaws.com'
 
         if 'account_id' in self.lambda_config:
@@ -93,6 +114,8 @@ class AWSLambdaBackend:
         msg = COMPUTE_CLI_MSG.format('AWS Lambda')
         logger.info(f"{msg} - Region: {self.region_name}")
 
+    def close(self):
+        self.aws_session.close()
     def _format_function_name(self, runtime_name, runtime_memory, version=__version__):
         runtime_name = runtime_name.replace('/', '__').replace('.', '').replace(':', '--')
         package = self.package.replace(__version__.replace(".", "-"), version.replace(".", "-"))
@@ -355,7 +378,6 @@ class AWSLambdaBackend:
         finally:
             # os.remove(LITHOPS_FUNCTION_ZIP)
             pass
-
         registry = f'{self.account_id}.dkr.ecr.{self.region_name}.amazonaws.com'
 
         res = self.ecr_client.get_authorization_token()
@@ -622,22 +644,14 @@ class AWSLambdaBackend:
 
         return runtimes
 
-    def invoke(self, runtime_name, runtime_memory, payload):
-        """
-        Invoke lambda function asynchronously
-        @param runtime_name: name of the runtime
-        @param runtime_memory: memory of the runtime in MB
-        @param payload: invoke dict payload
-        @return: invocation ID
-        """
-
+    def invoke_async(self, runtime_name, runtime_memory, payload):
         function_name = self._format_function_name(runtime_name, runtime_memory)
 
         headers = {'Host': self.host, 'X-Amz-Invocation-Type': 'Event', 'User-Agent': self.user_agent}
         url = f'https://{self.host}/2015-03-31/functions/{function_name}/invocations'
         request = AWSRequest(method="POST", url=url, data=json.dumps(payload, default=str), headers=headers)
         SigV4Auth(self.credentials, "lambda", self.region_name).add_auth(request)
-
+        start = time.time()
         invoked = False
         while not invoked:
             try:
@@ -645,7 +659,8 @@ class AWSLambdaBackend:
                 invoked = True
             except Exception:
                 pass
-
+        end = time.time()
+        print("Function took", end - start, "seconds to invoke")
         if r.status_code == 202:
             return r.headers['x-amzn-RequestId']
         elif r.status_code == 401:
@@ -658,23 +673,66 @@ class AWSLambdaBackend:
             logger.debug(r.text)
             raise Exception('Error {}: {}'.format(r.status_code, r.text))
 
-        # response = self.lambda_client.invoke(
-        #    FunctionName=function_name,
-        #     InvocationType='Event',
-        #     Payload=json.dumps(payload, default=str)
-        #  )
+    def invoke(self, runtime_name, runtime_memory, payload):
+        """
+        Invoke lambda function asynchronously
+        @param runtime_name: name of the runtime
+        @param runtime_memory: memory of the runtime in MB
+        @param payload: invoke dict payload
+        @return: invocation ID
+        """
+        # print("Starting invocation", payload)
+        function_name = self._format_function_name(runtime_name, runtime_memory)
+        # return None
+        # Save payload into json file
+        payload = json.dumps(payload, default=str)
+        print("Payload", payload)
+        try:
+            response = self.lambda_client.invoke(
+                FunctionName=function_name,
+                Payload=payload
+            )
+            if response['StatusCode'] == 200:
+                return json.loads(response['Payload'].read().decode('utf-8'))
+            else:
+                logger.debug(response)
+                if response['ResponseMetadata']['HTTPStatusCode'] == 401:
+                    raise Exception('Unauthorized - Invalid API Key')
+                elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
+                    raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
+                else:
+                    raise Exception(response)
+        except Exception as e:
+            # Reached the maximum number of attempts, raise an exception or perform any other action
+            raise Exception(f"Failed to invoke function: {e}")
 
-        # if response['ResponseMetadata']['HTTPStatusCode'] == 202:
-        #     return response['ResponseMetadata']['RequestId']
-        # else:
-        #     logger.debug(response)
-        #     if response['ResponseMetadata']['HTTPStatusCode'] == 401:
-        #         raise Exception('Unauthorized - Invalid API Key')
-        #     elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
-        #         raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
-        #     else:
-        #         raise Exception(response)
-
+    # async def invoke_async(self, runtime_name, runtime_memory, payload):
+    #     """
+    #     Invoke lambda function asynchronously
+    #     @param runtime_name: name of the runtime
+    #     @param runtime_memory: memory of the runtime in MB
+    #     @param payload: invoke dict payload
+    #     @return: invocation ID
+    #     """
+    #     function_name = self._format_function_name(runtime_name, runtime_memory)
+    #     try:
+    #         response = await self.aws_async_client.invoke(
+    #             FunctionName=function_name,
+    #             Payload=json.dumps(payload, default=str)
+    #         )
+    #         if response['StatusCode'] == 200:
+    #             return json.loads(response['Payload'].read().decode('utf-8'))
+    #         else:
+    #             logger.debug(response)
+    #             if response['ResponseMetadata']['HTTPStatusCode'] == 401:
+    #                 raise Exception('Unauthorized - Invalid API Key')
+    #             elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
+    #                 raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
+    #             else:
+    #                 raise Exception(response)
+    #     except Exception as e:
+    #         # Reached the maximum number of attempts, raise an exception or perform any other action
+    #         raise Exception(f"Failed to invoke function")
 
     def get_runtime_key(self, runtime_name, runtime_memory, version=__version__):
         """
@@ -730,3 +788,56 @@ class AWSLambdaBackend:
             return result
         else:
             raise Exception('An error occurred: {}'.format(result))
+
+    def close(self):
+        self.lambda_client.close()
+
+    def _wait_for_function_cold(self, func_name):
+        """
+        Helper function which waits for the lambda to be deployed (state is 'Active').
+        Raises exception if waiting times out or if state is 'Failed' or 'Inactive'
+        """
+        retries, sleep_seconds = (15, 25) if 'vpc' in self.lambda_config else (30, 5)
+
+        while retries > 0:
+            res = self.lambda_client.get_function_configuration(FunctionName=func_name)
+            state = res['LastUpdateStatus']
+            if state == 'InProgress':
+                time.sleep(sleep_seconds)
+                logger.debug('"{}" function is being deployed... '
+                             '(status: {})'.format(func_name, res['LastUpdateStatus']))
+                retries -= 1
+                if retries == 0:
+                    raise Exception('"{}" function not deployed (timed out): {}'.format(func_name, res))
+            elif state == 'Failed' or state == 'Inactive':
+                raise Exception('"{}" function not deployed (state is "{}"): {}'.format(func_name, state, res))
+            elif state == 'Successful':
+                break
+
+        logger.debug('Ok --> function "{}" is cold now'.format(func_name))
+
+    def force_cold(self,runtime_name, runtime_memory):
+        import random
+        function_name = self._format_function_name(runtime_name, runtime_memory)
+        response = self.lambda_client.update_function_configuration(
+            FunctionName=function_name,
+            MemorySize=runtime_memory,
+            Environment={
+                'Variables': {
+                    'Random': str(random.random())
+                }
+            },
+        )
+        self._wait_for_function_cold(function_name)
+        if response['MemorySize'] == runtime_memory:
+            return True
+        else:
+            logger.debug(response)
+            if response['ResponseMetadata']['HTTPStatusCode'] == 401:
+                raise Exception('Unauthorized - Invalid API Key')
+            elif response['ResponseMetadata']['HTTPStatusCode'] == 404:
+                raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
+            else:
+                raise Exception(response)
+
+

@@ -111,6 +111,65 @@ def function_handler(payload):
     os.environ.pop('__LITHOPS_TOTAL_EXECUTORS', None)
 
 
+
+def function_handler_light(payload):
+    job = SimpleNamespace(**payload)
+    setup_lithops_logger(job.log_level)
+
+    processes = min(job.worker_processes, len(job.call_ids))
+    logger.info(f'Tasks received: {len(job.call_ids)} - Concurrent processes: {processes}')
+
+    env = job.extra_env
+    env['LITHOPS_WORKER'] = 'True'
+    env['PYTHONUNBUFFERED'] = 'True'
+    os.environ.update(env)
+
+    storage_config = extract_storage_config(job.config)
+    internal_storage = InternalStorage(storage_config)
+    job.func = None
+    job_data = get_function_data(job, internal_storage)
+
+    if processes == 1:
+        job_queue = queue.Queue()
+        for call_id in job.call_ids:
+            data = job_data.pop(0)
+            job_queue.put((job, call_id, data))
+        job_queue.put(ShutdownSentinel())
+        process_runner(job_queue)
+    else:
+        manager = SyncManager()
+        manager.start()
+        job_queue = manager.Queue()
+        job_runners = []
+
+        for call_id in job.call_ids:
+            data = job_data.pop(0)
+            job_queue.put((job, call_id, data))
+
+        for i in range(processes):
+            job_queue.put(ShutdownSentinel())
+
+        for runner_id in range(processes):
+            p = mp.Process(target=process_runner, args=(job_queue,))
+            job_runners.append(p)
+            p.start()
+            logger.info('Worker process {} started'.format(runner_id))
+
+        for runner in job_runners:
+            runner.join()
+
+        manager.shutdown()
+
+    # Delete modules path from syspath
+    module_path = os.path.join(MODULES_DIR, job.job_key)
+    if module_path in sys.path:
+        sys.path.remove(module_path)
+
+    # Unset specific job env vars
+    for key in job.extra_env:
+        os.environ.pop(key, None)
+    os.environ.pop('__LITHOPS_TOTAL_EXECUTORS', None)
+
 def process_runner(job_queue):
     """
     Listens the job_queue and executes the jobs

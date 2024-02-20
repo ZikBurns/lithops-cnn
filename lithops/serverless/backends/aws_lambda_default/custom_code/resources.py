@@ -1,13 +1,13 @@
 import requests
-from lithops.serverless.backends.aws_lambda_custom.custom_code.model import OffSamplePredictModel
+from lithops.serverless.backends.aws_lambda_custom_image.custom_code.model import OffSamplePredictModel
 import boto3
 import time
 import botocore
-from lithops.serverless.backends.aws_lambda_custom.custom_code.transformations import  transform_images, transform_image, CustomAffineGridSample
+from lithops.serverless.backends.aws_lambda_custom_image.custom_code.transformations import  transform_images, transform_image, CustomAffineGridSample
 
 
 class PredictResource:
-    def __init__(self, model_path, batch_size=32):
+    def __init__(self, model_path=None, batch_size=32):
         start = time.time()
         self.model = None # OffSamplePredictModel(model_path)
         end = time.time()

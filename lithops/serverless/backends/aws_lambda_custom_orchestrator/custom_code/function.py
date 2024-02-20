@@ -62,7 +62,7 @@ def lambda_function_benchmark(event):
 
     print(payload_list)
     force_cold = event["force_cold"]
-    result, times = fexec.map_cnn_threading_benchmark(payload_list, force_cold=force_cold)
+    result, times = fexec.map_sync(payload_list, force_cold=force_cold)
 
     print(result)
     fexec.close()
@@ -90,7 +90,7 @@ def lambda_function_benchmark_batch(event):
     fexec = FunctionExecutor(reset=event["reset"], config=lithops_config, runtime_memory=3008)
     start = time()
     force_cold = event["force_cold"]
-    result, invocation_times = fexec.map_cnn_threading_benchmark(payload_list, force_cold=force_cold)
+    result, invocation_times = fexec.map_sync(payload_list, force_cold=force_cold)
     end = time()
     print(result)
     fexec.close()
@@ -118,7 +118,7 @@ def lambda_function_benchmark_batch_streaming(event):
     fexec = FunctionExecutor(reset=event["reset"], config=lithops_config, runtime_memory=3008)
     start = time()
     force_cold = event["force_cold"]
-    result, invocation_times = fexec.map_cnn_threading_benchmark(payload_list, force_cold=force_cold)
+    result, invocation_times = fexec.map_sync(payload_list, force_cold=force_cold)
     end = time()
     print(result)
     fexec.close()
@@ -148,7 +148,7 @@ def lambda_function_benchmark_batch_split_streaming(event):
     fexec = FunctionExecutor(reset=event["reset"], config=lithops_config, runtime_memory=3008)
     start = time()
     force_cold = event["force_cold"]
-    result, invocation_times = fexec.map_cnn_threading_benchmark(payload_list, force_cold=force_cold)
+    result, invocation_times = fexec.map_sync(payload_list, force_cold=force_cold)
     end = time()
     print(result)
     fexec.close()

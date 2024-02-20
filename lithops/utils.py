@@ -517,38 +517,41 @@ def verify_args(func, iterdata, extra_args):
         return [{'future': f} for f in iterdata]
 
     data = format_data(iterdata, extra_args)
+    if func:
+        # Verify parameters
+        non_verify_args = ['ibm_cos', 'storage', 'id', 'rabbitmq', 'installed_function']
 
-    # Verify parameters
-    non_verify_args = ['ibm_cos', 'storage', 'id', 'rabbitmq']
-    func_sig = inspect.signature(func)
+        func_sig = inspect.signature(func)
 
-    new_parameters = list()
-    for param in func_sig.parameters:
-        if param not in non_verify_args:
-            new_parameters.append(func_sig.parameters[param])
+        new_parameters = list()
+        for param in func_sig.parameters:
+            if param not in non_verify_args:
+                new_parameters.append(func_sig.parameters[param])
 
-    new_func_sig = func_sig.replace(parameters=new_parameters)
+        new_func_sig = func_sig.replace(parameters=new_parameters)
 
-    new_data = list()
-    for elem in data:
-        if type(elem) == dict:
-            if set(list(new_func_sig.parameters.keys())) <= set(elem):
-                new_data.append(elem)
+        new_data = list()
+        for elem in data:
+            if type(elem) == dict:
+                if set(list(new_func_sig.parameters.keys())) <= set(elem):
+                    new_data.append(elem)
+                else:
+                    raise ValueError("Check the args names in the data. "
+                                     "You provided these args: {}, and "
+                                     "the args must be: {}"
+                                     .format(list(elem.keys()),
+                                             list(new_func_sig.parameters.keys())))
+            elif type(elem) == tuple:
+                new_elem = dict(new_func_sig.bind(*list(elem)).arguments)
+                new_data.append(new_elem)
             else:
-                raise ValueError("Check the args names in the data. "
-                                 "You provided these args: {}, and "
-                                 "the args must be: {}"
-                                 .format(list(elem.keys()),
-                                         list(new_func_sig.parameters.keys())))
-        elif type(elem) == tuple:
-            new_elem = dict(new_func_sig.bind(*list(elem)).arguments)
-            new_data.append(new_elem)
-        else:
-            # single value (list, string, integer, dict, etc)
-            new_elem = dict(new_func_sig.bind(elem).arguments)
-            new_data.append(new_elem)
+                # single value (list, string, integer, dict, etc)
+                new_elem = dict(new_func_sig.bind(elem).arguments)
+                new_data.append(new_elem)
 
-    return new_data
+        return new_data
+    else:
+        return data
 
 
 class WrappedStreamingBody:

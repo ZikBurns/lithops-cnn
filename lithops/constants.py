@@ -17,7 +17,7 @@
 import os
 import sys
 import tempfile
-
+THREADPOOL_SIZE = 1000
 LOGGER_LEVEL = 'info'
 LOGGER_STREAM = 'ext://sys.stderr'
 LOGGER_FORMAT = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)s -- %(message)s"
@@ -99,7 +99,11 @@ SERVERLESS_BACKENDS = [
     'knative',
     'openwhisk',
     'aws_lambda',
+    'aws_lambda_cpp',
+    'aws_lambda_async',
     'aws_lambda_custom',
+    'aws_lambda_default',
+    'aws_lambda_custom_image',
     'aws_lambda_custom_orchestrator',
     'aws_batch',
     'gcp_cloudrun',

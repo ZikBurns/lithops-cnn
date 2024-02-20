@@ -155,8 +155,8 @@ class Invoker:
                    'runtime_name': job.runtime_name,
                    'runtime_memory': job.runtime_memory,
                    'worker_processes': job.worker_processes}
-        if not isinstance(job.data_byte_strs[0],bytes):
-            payload["data_byte_strs"] = job.data_byte_strs
+        # if isinstance(job.data_byte_strs[0],bytes):
+        #     payload["data_byte_strs"] = job.data_byte_strs
         return payload
 
     def _run_job(self, job):
@@ -293,6 +293,8 @@ class FaaSInvoker(Invoker):
 
         logger.debug('ExecutorID {} - Serverless invoker created'.format(self.executor_id))
 
+        self.times = {"start":[], "end":[]}
+
     def _start_async_invokers(self):
         """Starts the invoker process responsible to spawn pending calls
         in background.
@@ -361,13 +363,16 @@ class FaaSInvoker(Invoker):
         else:
             del payload['data_byte_ranges']
             payload['data_byte_strs'] = [job.data_byte_strs[int(call_id)] for call_id in call_ids]
-        if payload['func_key']=="custom":
-            payload['data_byte_strs'] = [job.data_byte_strs[int(call_id)] for call_id in call_ids][0]
+        # if payload['func_key']=="custom":
+        #     payload['data_byte_strs'] = [job.data_byte_strs[int(call_id)] for call_id in call_ids][0]
 
         # do the invocation
         start = time.time()
+        self.times["start"].append(start)
         activation_id = self.compute_handler.invoke(payload)
-        roundtrip = time.time() - start
+        end = time.time()
+        self.times["end"].append(end)
+        roundtrip = end - start
         resp_time = format(round(roundtrip, 3), '.3f')
 
         if not activation_id:
@@ -484,7 +489,7 @@ def extend_runtime(job, compute_handler, internal_storage):
 
     base_docker_image = job.runtime_name
     uuid = job.ext_runtime_uuid
-    ext_runtime_name = "{}:{}".format(base_docker_image.split(":")[0], uuid)
+    ext_runtime_name = f'{base_docker_image.split(":")[0]}:{uuid}'
 
     # update job with new extended runtime name
     job.runtime_name = ext_runtime_name
@@ -493,17 +498,16 @@ def extend_runtime(job, compute_handler, internal_storage):
     runtime_meta = internal_storage.get_runtime_meta(runtime_key)
 
     if not runtime_meta:
-        logger.info('Creating runtime: {}, memory: {}MB'.format(ext_runtime_name, job.runtime_memory))
+        logger.info(f'Creating runtime: {ext_runtime_name}, memory: {job.runtime_memory}MB')
 
         ext_docker_file = '/'.join([job.local_tmp_dir, "Dockerfile"])
 
         # Generate Dockerfile extended with function dependencies and function
         with open(ext_docker_file, 'w') as df:
             df.write('\n'.join([
-                'FROM {}'.format(base_docker_image),
-                'ENV PYTHONPATH=/tmp/lithops/modules:$PYTHONPATH',
-                # set python path to point to dependencies folder
-                'COPY . /tmp/lithops'
+                f'FROM {base_docker_image}',
+                'ENV PYTHONPATH=/opt/lithops/modules:$PYTHONPATH',
+                'COPY . /opt/lithops'
             ]))
 
         # Build new extended runtime tagged by function hash
@@ -511,11 +515,12 @@ def extend_runtime(job, compute_handler, internal_storage):
         os.chdir(job.local_tmp_dir)
         compute_handler.build_runtime(ext_runtime_name, ext_docker_file)
         os.chdir(cwd)
-        shutil.rmtree(job.local_tmp_dir, ignore_errors=True)
 
         runtime_meta = compute_handler.deploy_runtime(ext_runtime_name, job.runtime_memory, job.runtime_timeout)
         runtime_meta['runtime_timeout'] = job.runtime_timeout
         internal_storage.put_runtime_meta(runtime_key, runtime_meta)
+        os.chdir(cwd)
+        shutil.rmtree(job.local_tmp_dir, ignore_errors=True)
 
     # Verify python version and lithops version
     if __version__ != runtime_meta['lithops_version']:

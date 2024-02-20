@@ -27,6 +27,7 @@ import requests
 import traceback
 from pydoc import locate
 from distutils.util import strtobool
+from lithops.serverless.included_function.function import lambda_function
 
 from lithops.worker.utils import peak_memory
 
@@ -206,8 +207,14 @@ class JobRunner:
         fn_name = None
 
         try:
+            start_tstamp = time.time()
             func = pickle.loads(self.job.func)
+            end_tstamp = time.time()
+            print(f"Function deserialization time: {end_tstamp - start_tstamp} seconds")
+            start_tstamp = time.time()
             data = pickle.loads(self.job.data)
+            end_tstamp = time.time()
+            print(f"Data deserialization time: {end_tstamp - start_tstamp} seconds")
 
             if strtobool(os.environ.get('__LITHOPS_REDUCE_JOB', 'False')):
                 self._wait_futures(data)
@@ -229,7 +236,9 @@ class JobRunner:
                     ('function_name', fn_name or 'undefined')
                 )
             )
-
+            print(data)
+            if self.job.config['lithops'].get('customized_runtime'):
+                data['installed_function'] = lambda_function
             logger.info("Going to execute '{}()'".format(str(fn_name)))
             print('---------------------- FUNCTION LOG ----------------------')
             function_start_tstamp = time.time()

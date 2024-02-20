@@ -58,6 +58,15 @@ class ServerlessHandler:
 
         return self.backend.invoke(runtime_name, runtime_memory, job_payload)
 
+    def invoke_sync(self, job_payload):
+        """
+        Invoke -- return information about this invocation
+        """
+        runtime_name = job_payload['runtime_name']
+        runtime_memory = job_payload['runtime_memory']
+
+        return self.backend.invoke_sync(runtime_name, runtime_memory, job_payload)
+
     def build_runtime(self, runtime_name, file, extra_args=[]):
         """
         Wrapper method to build a new runtime for the compute backend.

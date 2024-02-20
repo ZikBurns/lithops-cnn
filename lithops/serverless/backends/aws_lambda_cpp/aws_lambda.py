@@ -23,7 +23,7 @@ import zipfile
 import subprocess
 import botocore.exceptions
 import base64
-
+import ctypes
 from botocore.httpsession import URLLib3Session
 from botocore.awsrequest import AWSRequest
 from botocore.auth import SigV4Auth
@@ -51,7 +51,7 @@ class AWSLambdaBackend:
         """
         logger.debug('Creating AWS Lambda client')
 
-        self.name = 'aws_lambda'
+        self.name = 'aws_lambda_cpp'
         self.type = 'faas'
         self.lambda_config = lambda_config
         self.internal_storage = internal_storage
@@ -92,6 +92,17 @@ class AWSLambdaBackend:
 
         msg = COMPUTE_CLI_MSG.format('AWS Lambda')
         logger.info(f"{msg} - Region: {self.region_name}")
+
+        # LD_LIBRARY_PATH
+        # ld_library_path = os.environ.get('LD_LIBRARY_PATH', '')
+        # ld_library_path += ':/usr/local/lib:/usr/bin/openssl/lib'
+        # os.environ['LD_LIBRARY_PATH'] = ld_library_path
+
+        current_path = os.path.dirname(os.path.abspath(__file__))
+        self.lib = ctypes.cdll.LoadLibrary(f'{current_path}/liblambda_invoker.so')
+
+        self.lib.invoke_lambda.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+        self.lib.invoke_lambda.restype = ctypes.c_char_p
 
     def _format_function_name(self, runtime_name, runtime_memory, version=__version__):
         runtime_name = runtime_name.replace('/', '__').replace('.', '').replace(':', '--')
@@ -467,7 +478,7 @@ class AWSLambdaBackend:
             images = response['imageDetails']
             if not images:
                 raise Exception(f'Runtime {runtime_name} is not present in ECR.'
-                                'Consider running "lithops runtime build -b aws_lambda ..."')
+                                'Consider running "lithops runtime build -b aws_lambda_cpp ..."')
             image = list(filter(lambda image: 'imageTags' in image and tag in image['imageTags'], images)).pop()
             image_digest = image['imageDigest']
         except botocore.exceptions.ClientError:
@@ -674,6 +685,38 @@ class AWSLambdaBackend:
         #         raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
         #     else:
         #         raise Exception(response)
+
+    def invoke_cpp(self, runtime_name, runtime_memory, payload):
+        """
+        Invoke lambda function asynchronously
+        @param runtime_name: name of the runtime
+        @param runtime_memory: memory of the runtime in MB
+        @param payload: invoke dict payload
+        @return: invocation ID
+        """
+
+        region = self.region_name.encode('utf-8')
+        function_name = self._format_function_name(runtime_name, runtime_memory).encode('utf-8')
+        access_key = self.lambda_config['access_key_id'].encode('utf-8')
+        secret_key = self.lambda_config['secret_access_key'].encode('utf-8')
+        session_token = self.lambda_config.get('session_token').encode('utf-8')
+        payload = json.dumps(payload, default=str).encode('utf-8')
+
+        response = self.lib.invoke_lambda(function_name, region, access_key, secret_key, session_token, payload)
+
+        status_code_int = int(response[:3])
+
+        if status_code_int == 202:
+            return str(status_code_int)
+        elif status_code_int == 401:
+            logger.debug(response)
+            raise Exception('Unauthorized - Invalid API Key')
+        elif status_code_int == 404:
+            logger.debug(response)
+            raise Exception('Lithops Runtime: {} not deployed'.format(runtime_name))
+        else:
+            logger.debug(response)
+            raise Exception('Error: {}'.format( response))
 
 
     def get_runtime_key(self, runtime_name, runtime_memory, version=__version__):
