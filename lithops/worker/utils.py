@@ -48,8 +48,8 @@ def get_function_and_modules(job, internal_storage):
         func_path = '/'.join(["/opt/lithops", job.func_key])
         with open(func_path, "rb") as f:
             func_obj = f.read()
-    elif job.func_key:
-            func_obj = internal_storage.get_func(job.func_key)
+    else:
+        func_obj = internal_storage.get_func(job.func_key)
 
     loaded_func_all = pickle.loads(func_obj)
 
@@ -257,6 +257,7 @@ class LogStream:
     def flush(self):
         try:
             self._stream.flush()
+            self._stdout.flush()
         except ValueError:
             pass
 

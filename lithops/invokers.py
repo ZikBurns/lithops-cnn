@@ -28,8 +28,7 @@ from lithops.future import ResponseFuture
 from lithops.config import extract_storage_config
 from lithops.version import __version__
 from lithops.utils import verify_runtime_name, version_str, is_lithops_worker, iterchunks
-from lithops.constants import LOGGER_LEVEL, LOGS_DIR,\
-    LOCALHOST, SERVERLESS, STANDALONE
+from lithops.constants import LOGGER_LEVEL, LOGS_DIR, SERVERLESS
 from lithops.util.metrics import PrometheusExporter
 
 logger = logging.getLogger(__name__)
@@ -139,6 +138,7 @@ class Invoker:
         payload = {'config': self.config,
                    'chunksize': job.chunksize,
                    'log_level': self.log_level,
+                   'func_name': job.function_name,
                    'func_key': job.func_key,
                    'data_key': job.data_key,
                    'extra_env': job.extra_env,
@@ -155,8 +155,7 @@ class Invoker:
                    'runtime_name': job.runtime_name,
                    'runtime_memory': job.runtime_memory,
                    'worker_processes': job.worker_processes}
-        # if isinstance(job.data_byte_strs[0],bytes):
-        #     payload["data_byte_strs"] = job.data_byte_strs
+
         return payload
 
     def _run_job(self, job):
@@ -176,7 +175,7 @@ class Invoker:
                             job.function_name, job.total_calls))
 
         logger.debug('ExecutorID {} | JobID {} - Worker processes: {} - Chunksize: {}'
-                     .format(job.executor_id, job.job_id, job.worker_processes, job.chunksize))
+                     .format(job.executor_id, job.job_id, job.worker_processes, job.chunksize or "AUTO"))
 
         self.prometheus.send_metric(
             name='job_total_calls',
@@ -258,12 +257,6 @@ class BatchInvoker(Invoker):
         """
         Run a job
         """
-        # Ensure only self.max_workers are started
-        total_workers = job.total_calls // job.chunksize + (job.total_calls % job.chunksize > 0)
-        if self.max_workers < total_workers:
-            job.chunksize = job.total_calls // self.max_workers + (job.total_calls % self.max_workers > 0)
-
-        # Perform the invocation
         futures = self._run_job(job)
         self.job_monitor.start(futures)
 
@@ -292,8 +285,6 @@ class FaaSInvoker(Invoker):
         self.executor = ThreadPoolExecutor(invoke_pool_threads)
 
         logger.debug('ExecutorID {} - Serverless invoker created'.format(self.executor_id))
-
-        self.times = {"start":[], "end":[]}
 
     def _start_async_invokers(self):
         """Starts the invoker process responsible to spawn pending calls
@@ -363,16 +354,11 @@ class FaaSInvoker(Invoker):
         else:
             del payload['data_byte_ranges']
             payload['data_byte_strs'] = [job.data_byte_strs[int(call_id)] for call_id in call_ids]
-        # if payload['func_key']=="custom":
-        #     payload['data_byte_strs'] = [job.data_byte_strs[int(call_id)] for call_id in call_ids][0]
 
         # do the invocation
         start = time.time()
-        self.times["start"].append(start)
         activation_id = self.compute_handler.invoke(payload)
-        end = time.time()
-        self.times["end"].append(end)
-        roundtrip = end - start
+        roundtrip = time.time() - start
         resp_time = format(round(roundtrip, 3), '.3f')
 
         if not activation_id:
@@ -414,6 +400,8 @@ class FaaSInvoker(Invoker):
         Normal Invocation
         Use local threads to perform all the function invocations
         """
+        self.compute_handler.pre_invoke(job)
+
         if self.remote_invoker:
             return self._invoke_job_remote(job)
 
@@ -488,8 +476,9 @@ def extend_runtime(job, compute_handler, internal_storage):
     """
 
     base_docker_image = job.runtime_name
-    uuid = job.ext_runtime_uuid
-    ext_runtime_name = f'{base_docker_image.split(":")[0]}:{uuid}'
+    # uuid = job.ext_runtime_uuid
+    uuid = 'ext'
+    ext_runtime_name = "{}:{}".format(base_docker_image.split(":")[0], uuid)
 
     # update job with new extended runtime name
     job.runtime_name = ext_runtime_name
@@ -515,12 +504,11 @@ def extend_runtime(job, compute_handler, internal_storage):
         os.chdir(job.local_tmp_dir)
         compute_handler.build_runtime(ext_runtime_name, ext_docker_file)
         os.chdir(cwd)
+        shutil.rmtree(job.local_tmp_dir, ignore_errors=True)
 
         runtime_meta = compute_handler.deploy_runtime(ext_runtime_name, job.runtime_memory, job.runtime_timeout)
         runtime_meta['runtime_timeout'] = job.runtime_timeout
         internal_storage.put_runtime_meta(runtime_key, runtime_meta)
-        os.chdir(cwd)
-        shutil.rmtree(job.local_tmp_dir, ignore_errors=True)
 
     # Verify python version and lithops version
     if __version__ != runtime_meta['lithops_version']:

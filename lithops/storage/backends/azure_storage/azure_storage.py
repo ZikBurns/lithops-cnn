@@ -48,7 +48,7 @@ class AzureBlobStorageBackend:
 
     def create_bucket(self, bucket_name):
         """
-        Create a bucket if not exists
+        Create a bucket if it doesn't exist
         """
         try:
             self.blob_client.create_container(bucket_name)
@@ -95,7 +95,7 @@ class AzureBlobStorageBackend:
         except ResourceNotFoundError:
             raise StorageNoSuchKeyError(bucket_name, key)
 
-    def upload_file(self, file_name, bucket, key=None, extra_args={}):
+    def upload_file(self, file_name, bucket, key=None, extra_args={}, config=None):
         """Upload a file
 
         :param file_name: File to upload
@@ -116,7 +116,7 @@ class AzureBlobStorageBackend:
             return False
         return True
 
-    def download_file(self, bucket, key, file_name=None, extra_args={}):
+    def download_file(self, bucket, key, file_name=None, extra_args={}, config=None):
         """Download a file
 
         :param bucket: Bucket to download from

@@ -33,9 +33,9 @@ from lithops import utils
 from lithops.constants import COMPUTE_CLI_MSG
 from lithops.version import __version__
 
-invoke_mutex = Lock()
-
 from . import config
+
+invoke_mutex = Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class GCPCloudRunBackend:
 
     def __init__(self, cloudrun_config, internal_storage):
         self.name = 'gcp_cloudrun'
-        self.type = 'faas'
+        self.type = utils.BackendType.FAAS.value
         self.cr_config = cloudrun_config
         self.region = cloudrun_config['region']
         self.trigger = cloudrun_config['trigger']
@@ -309,14 +309,15 @@ class GCPCloudRunBackend:
         if runtime_name == self._get_default_runtime_image_name():
             self._build_default_runtime(runtime_name)
 
-        logger.info(f"Deploying runtime: {runtime_name} - Memory: {memory} Timeout: {timeout}")
+        img_name = self._format_image_name(runtime_name)
+        logger.info(f"Deploying runtime: {img_name} - Memory: {memory} Timeout: {timeout}")
         self._create_service(runtime_name, memory, timeout)
         runtime_meta = self._generate_runtime_meta(runtime_name, memory)
         return runtime_meta
 
     def delete_runtime(self, runtime_name, runtime_memory, version=__version__):
-        logger.info(f'Deleting runtime: {runtime_name} - {runtime_memory}MB')
         img_name = self._format_image_name(runtime_name)
+        logger.info(f'Deleting runtime: {img_name} - {runtime_memory}MB')
         service_name = self._format_service_name(img_name, runtime_memory, version)
         self._delete_service(service_name)
 
@@ -371,12 +372,13 @@ class GCPCloudRunBackend:
         runtimes = []
         for item in res['items']:
             labels = item['spec']['template']['metadata']['labels']
+            wk_name = item['metadata']['name']
             if labels and 'type' in labels and labels['type'] == 'lithops-runtime':
                 version = labels['lithops-version'].replace('-', '.')
                 container = item['spec']['template']['spec']['containers'][0]
                 memory = container['resources']['limits']['memory'].replace('Mi', '')
                 if runtime_name in container['image'] or runtime_name == 'all':
-                    runtimes.append((container['image'], memory, version))
+                    runtimes.append((container['image'], memory, version, wk_name))
 
         return runtimes
 

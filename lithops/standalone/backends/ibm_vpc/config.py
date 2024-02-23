@@ -36,13 +36,13 @@ DEFAULT_CONFIG_KEYS = {
     'ssh_key_filename': '~/.ssh/id_rsa',
     'delete_on_dismantle': True,
     'max_workers': 100,
-    'worker_processes': 2,
     'boot_volume_capacity': 100
 }
 
 VPC_ENDPOINT = "https://{}.iaas.cloud.ibm.com"
 
 REGIONS = ["jp-tok", "jp-osa", "au-syd", "eu-gb", "eu-de", "eu-es", "us-south", "us-east", "br-sao", "ca-tor"]
+
 
 def load_config(config_data):
 
@@ -70,13 +70,16 @@ def load_config(config_data):
     else:
         params_to_check = MANDATORY_PARAMETERS_2
 
+    if "worker_processes" not in config_data['ibm_vpc']:
+        config_data['ibm_vpc']['worker_processes'] = "AUTO"
+
+    if "chunksize" not in config_data['lithops']:
+        config_data['lithops']['chunksize'] = 0
+
     for param in params_to_check:
         if param not in config_data['ibm_vpc']:
             msg = f"'{param}' is mandatory in 'ibm_vpc' section of the configuration"
             raise Exception(msg)
-
-    if "profile_name" in config_data['ibm_vpc']:
-        config_data['ibm_vpc']['worker_profile_name'] = config_data['ibm_vpc']['profile_name']
 
     if "region" not in config_data['ibm_vpc'] and "endpoint" not in config_data['ibm_vpc']:
         msg = "'region' or 'endpoint' parameter is mandatory in 'ibm_vpc' section of the configuration"
@@ -84,10 +87,20 @@ def load_config(config_data):
 
     if 'endpoint' in config_data['ibm_vpc']:
         endpoint = config_data['ibm_vpc']['endpoint']
-        config_data['ibm_vpc']['region'] = endpoint.split('//')[1].split('.')[0]
+        region = endpoint.split('//')[1].split('.')[0]
+        config_data['ibm_vpc']['region'] = region
+        config_data['ibm_vpc']['zone'] = region + '-1'
 
     elif "region" in config_data['ibm_vpc']:
         region = config_data['ibm_vpc']['region']
+
+        if region.count('-') == 2:
+            config_data['ibm_vpc']['zone'] = region
+            region = region.rsplit('-', 1)[0]
+            config_data['ibm_vpc']['region'] = region
+        else:
+            config_data['ibm_vpc']['zone'] = region + '-1'
+
         if region not in REGIONS:
             msg = f"'region' conig parameter in 'ibm_vpc' section must be one of {REGIONS}"
             raise Exception(msg)

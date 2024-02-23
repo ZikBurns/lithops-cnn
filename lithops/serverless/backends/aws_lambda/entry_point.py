@@ -21,6 +21,7 @@ from lithops.utils import setup_lithops_logger
 from lithops.worker import function_handler
 from lithops.worker import function_invoker
 from lithops.worker.utils import get_runtime_metadata
+from lithops.serverless.included_function.function import default_function
 
 logger = logging.getLogger('lithops.worker')
 
@@ -34,6 +35,9 @@ def lambda_handler(event, context):
     if 'get_metadata' in event:
         logger.info(f"Lithops v{__version__} - Generating metadata")
         return get_runtime_metadata()
+    elif 'sync_invoker' in event:
+        logger.info(f"Lithops v{__version__} - Starting AWS Lambda invoker")
+        return default_function(event['data_byte_strs']['payload'])
     elif 'remote_invoker' in event:
         logger.info(f"Lithops v{__version__} - Starting AWS Lambda invoker")
         function_invoker(event)

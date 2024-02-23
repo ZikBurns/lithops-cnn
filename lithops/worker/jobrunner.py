@@ -27,20 +27,20 @@ import requests
 import traceback
 from pydoc import locate
 from distutils.util import strtobool
-from lithops.serverless.included_function.function import lambda_function
-
+from lithops.serverless.included_function.function import default_function
 from lithops.worker.utils import peak_memory
 
 try:
     import numpy as np
+    np.__version__
 except ModuleNotFoundError:
     pass
 
 from lithops.storage import Storage
 from lithops.wait import wait
 from lithops.future import ResponseFuture
-from lithops.utils import WrappedStreamingBody, sizeof_fmt, is_object_processing_function, FuturesList,\
-    verify_args
+from lithops.utils import WrappedStreamingBody, sizeof_fmt, \
+    is_object_processing_function, FuturesList, verify_args
 from lithops.utils import WrappedStreamingBodyPartition
 from lithops.util.metrics import PrometheusExporter
 from lithops.storage.utils import create_output_key
@@ -207,14 +207,8 @@ class JobRunner:
         fn_name = None
 
         try:
-            start_tstamp = time.time()
             func = pickle.loads(self.job.func)
-            end_tstamp = time.time()
-            print(f"Function deserialization time: {end_tstamp - start_tstamp} seconds")
-            start_tstamp = time.time()
             data = pickle.loads(self.job.data)
-            end_tstamp = time.time()
-            print(f"Data deserialization time: {end_tstamp - start_tstamp} seconds")
 
             if strtobool(os.environ.get('__LITHOPS_REDUCE_JOB', 'False')):
                 self._wait_futures(data)
@@ -236,9 +230,8 @@ class JobRunner:
                     ('function_name', fn_name or 'undefined')
                 )
             )
-            print(data)
             if self.job.config['lithops'].get('customized_runtime'):
-                data['installed_function'] = lambda_function
+                data['installed_function'] = default_function
             logger.info("Going to execute '{}()'".format(str(fn_name)))
             print('---------------------- FUNCTION LOG ----------------------')
             function_start_tstamp = time.time()
@@ -255,7 +248,7 @@ class JobRunner:
             if result is not None:
                 # Check for new futures
                 if isinstance(result, ResponseFuture) or isinstance(result, FuturesList) \
-                   or (type(result) == list and len(result) > 0 and isinstance(result[0], ResponseFuture)):
+                   or (type(result) is list and len(result) > 0 and isinstance(result[0], ResponseFuture)):
                     self.stats.write('new_futures', pickle.dumps(result))
                     result = None
                 else:

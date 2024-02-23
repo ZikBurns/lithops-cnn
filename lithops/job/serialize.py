@@ -28,6 +28,7 @@ from functools import reduce
 from importlib import import_module
 from types import CodeType, FunctionType, ModuleType
 
+from lithops.libs import imp
 from lithops.utils import bytes_to_b64str
 from lithops.libs.multyvac.module_dependency import ModuleDependencyAnalyzer
 
@@ -45,61 +46,76 @@ class SerializeIndependent:
         """
         Serialize f, args, kwargs independently
         """
-        self._modulemgr = ModuleDependencyAnalyzer()
         preinstalled_modules = [name for name, _ in self.preinstalled_modules]
-        self._modulemgr.ignore(preinstalled_modules)
-        if not include_modules:
-            self._modulemgr.ignore(exclude_modules)
 
-        # Inspect modules
         strs = []
-        modules = set()
+        mod_paths = set()
 
         for obj in list_of_objs:
-            modules.update(self._module_inspect(obj))
             strs.append(cloudpickle.dumps(obj))
 
-        # Add modules
-        direct_modules = set()
-        mods_paths = set()
+        if include_modules is None:
+            # If include_modules is explicitly set to None, no module is included
+            return (strs, mod_paths)
 
-        for module_name in modules:
-            if module_name in ['__main__', None]:
-                continue
-            try:
-                mod_spec = importlib.util.find_spec(module_name)
-            except Exception:
-                mod_spec = None
+        if len(include_modules) == 0:
+            # If include_modules is not provided (empty list by default),
+            # inspect the objects looking for referenced modules
+            self._modulemgr = ModuleDependencyAnalyzer()
+            self._modulemgr.ignore(preinstalled_modules)
+            self._modulemgr.ignore(exclude_modules)
 
-            origin = mod_spec.origin if mod_spec else module_name
-            if origin and origin.endswith('.so'):
-                if origin not in exclude_modules and \
-                   os.path.basename(origin) not in exclude_modules:
-                    mods_paths.add(origin)
-            else:
-                self._modulemgr.add(module_name)
+            ref_modules = set()
 
-            direct_modules.add(origin if origin != 'built-in' else module_name)
+            for obj in list_of_objs:
+                ref_modules.update(self._module_inspect(obj))
 
-        logger.debug("Referenced modules: {}".format(None if not
-                     direct_modules else ", ".join(direct_modules)))
+            logger.debug("Referenced Modules: {}".format(None if not
+                         ref_modules else ", ".join(ref_modules)))
 
-        if include_modules is not None:
+            for module_name in ref_modules:
+                if module_name in ['__main__', None]:
+                    continue
+                try:
+                    mod_spec = importlib.util.find_spec(module_name)
+                except Exception:
+                    mod_spec = None
+
+                origin = mod_spec.origin if mod_spec else module_name
+                if origin and origin.endswith('.so'):
+                    if origin not in exclude_modules and \
+                       os.path.basename(origin) not in exclude_modules:
+                        mod_paths.add(origin)
+                else:
+                    self._modulemgr.add(module_name)
+
             tent_mod_paths = self._modulemgr.get_and_clear_paths()
-            if include_modules:
-                logger.debug("Tentative modules to transmit: {}"
-                             .format(None if not tent_mod_paths else ", ".join(tent_mod_paths)))
-                logger.debug("Include modules: {}".format(", ".join(include_modules)))
-                for im in include_modules:
-                    for mp in tent_mod_paths:
-                        if im in mp:
-                            mods_paths.add(mp)
-                            break
-            else:
-                mod_paths = mods_paths.union(tent_mod_paths)
+            mod_paths = mod_paths.union(tent_mod_paths)
 
-        logger.debug("Modules to transmit: {}".format(None if
-                     not mod_paths else ", ".join(mod_paths)))
+        else:
+            # If include_modules is provided, include only the provided list
+            logger.debug("Include Modules: {}".format(", ".join(include_modules)))
+            for module_name in include_modules:
+                if module_name.endswith('.so') or module_name.endswith('.py'):
+                    pathname = os.path.abspath(module_name)
+                    if os.path.isfile(pathname):
+                        logger.debug(f"Module '{module_name}' found in {pathname}")
+                        mod_paths.add(pathname)
+                    else:
+                        logger.debug(f"Could not find module '{module_name}', skipping")
+                    continue
+                module_root = module_name.split('.')[0]
+                if module_root in preinstalled_modules:
+                    logger.debug(f"Module '{module_name}' is already installed in the runtime, skipping")
+                    continue
+                try:
+                    fp, pathname, description = imp.find_module(module_root)
+                    logger.debug(f"Module '{module_name}' found in {pathname}")
+                    mod_paths.add(pathname)
+                except ImportError:
+                    logger.debug(f"Could not find module '{module_name}', skipping")
+
+        logger.debug("Modules to transmit: {}".format(None if not mod_paths else ", ".join(mod_paths)))
 
         return (strs, mod_paths)
 
@@ -111,8 +127,7 @@ class SerializeIndependent:
         seen = set()
         mods = set()
 
-        if inspect.isfunction(obj) or (inspect.ismethod(obj) and
-           inspect.isfunction(obj.__func__)):
+        if inspect.isfunction(obj) or (inspect.ismethod(obj) and inspect.isfunction(obj.__func__)):
             # The obj is the user's function
             worklist.append(obj)
 
@@ -121,7 +136,7 @@ class SerializeIndependent:
                 if k == '__globals__':
                     mods.add(v['__file__'])
 
-        elif type(obj) == dict:
+        elif type(obj) is dict:
             # the obj is the user's iterdata
             for param in obj.values():
                 if type(param).__module__ == "__builtin__":
@@ -132,15 +147,13 @@ class SerializeIndependent:
                 else:
                     # it is a user defined class
                     for k, v in inspect.getmembers(param):
-                        if inspect.isfunction(v) or (inspect.ismethod(v) and
-                           inspect.isfunction(v.__func__)):
+                        if inspect.isfunction(v) or (inspect.ismethod(v) and inspect.isfunction(v.__func__)):
                             worklist.append(v)
         else:
             # The obj is the user's function but in form of a class
             found_methods = []
             for k, v in inspect.getmembers(obj):
-                if inspect.isfunction(v) or (inspect.ismethod(v) and
-                   inspect.isfunction(v.__func__)):
+                if inspect.isfunction(v) or (inspect.ismethod(v) and inspect.isfunction(v.__func__)):
                     found_methods.append(k)
                     worklist.append(v)
             if "__call__" not in found_methods:
@@ -184,7 +197,7 @@ class SerializeIndependent:
                     elif inspect.iscode(v):
                         codeworklist.append(v)
 
-        return mods
+        return set([mod_name.split('.')[0] for mod_name in mods])
 
     def _inner_module_inspect(self, inst):
         """

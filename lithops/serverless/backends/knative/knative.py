@@ -50,7 +50,7 @@ class KnativeServingBackend:
 
     def __init__(self, knative_config, internal_storage):
         self.name = 'knative'
-        self.type = 'faas'
+        self.type = utils.BackendType.FAAS.value
         self.kn_config = knative_config
         self.ingress_endpoint = self.kn_config.get('ingress_endpoint')
         self.kubecfg_path = self.kn_config.get('kubecfg_path')
@@ -92,7 +92,7 @@ class KnativeServingBackend:
                 ip = None
                 ingress = self.core_api.read_namespaced_service(service, namespace)
                 http_port = list(filter(lambda port: port.port == 80, ingress.spec.ports))[0].node_port
-                https_port = list(filter(lambda port: port.port == 443, ingress.spec.ports))[0].node_port
+                # https_port = list(filter(lambda port: port.port == 443, ingress.spec.ports))[0].node_port
                 if ingress.status.load_balancer.ingress is not None:
                     # get loadbalancer ip
                     ip = ingress.status.load_balancer.ingress[0].ip
@@ -113,7 +113,7 @@ class KnativeServingBackend:
                     self.ingress_endpoint = f'http://{ip}:{http_port}'
                     self.kn_config['ingress_endpoint'] = self.ingress_endpoint
                     logger.debug(f"Ingress endpoint set to {self.ingress_endpoint}")
-            except Exception as e:
+            except Exception:
                 pass
 
         if 'service_host_suffix' not in self.kn_config:
@@ -420,7 +420,7 @@ class KnativeServingBackend:
 
         try:
             self.core_api.delete_namespaced_secret("lithops-regcred", self.namespace)
-        except ApiException as e:
+        except ApiException:
             pass
 
         try:
@@ -572,6 +572,15 @@ class KnativeServingBackend:
         finally:
             os.remove(config.FH_ZIP_LOCATION)
 
+        docker_user = self.kn_config.get("docker_user")
+        docker_password = self.kn_config.get("docker_password")
+        docker_server = self.kn_config.get("docker_server")
+
+        if docker_user and docker_password:
+            logger.debug('Container registry credentials found in config. Logging in into the registry')
+            cmd = f'{docker_path} login -u {docker_user} --password-stdin {docker_server}'
+            utils.run_command(cmd, input=docker_password)
+
         logger.debug(f'Pushing runtime {runtime_name} to container registry')
         if utils.is_podman(docker_path):
             cmd = f'{docker_path} push {runtime_name} --format docker --remove-signatures'
@@ -601,13 +610,13 @@ class KnativeServingBackend:
         Deletes all runtimes deployed in knative
         """
         runtimes = self.list_runtimes()
-        for img_name, memory, version in runtimes:
+        for img_name, memory, version, wk_name in runtimes:
             self.delete_runtime(img_name, memory, version)
 
     def list_runtimes(self, runtime_name='all'):
         """
         List all the runtimes deployed in knative
-        return: list of tuples [runtime_name, memory, version]
+        return: list of tuples [runtime_name, memory, version, worker_name]
         """
         knative_services = self.custom_api.list_namespaced_custom_object(
             group=config.DEFAULT_GROUP,
@@ -621,13 +630,14 @@ class KnativeServingBackend:
             try:
                 template = service['spec']['template']
                 labels = template['metadata']['labels']
+                wk_name = service['metadata']['name']
                 if labels and 'type' in labels and labels['type'] == 'lithops-runtime':
                     version = labels['lithops-version'].replace('-', '.')
                     container = template['spec']['containers'][0]
                     memory = container['resources']['requests']['memory'].replace('Mi', '')
                     memory = int(memory.replace('Gi', '')) * 1024 if 'Gi' in memory else memory
                     if runtime_name in container['image'] or runtime_name == 'all':
-                        runtimes.append((container['image'], memory, version))
+                        runtimes.append((container['image'], memory, version, wk_name))
             except Exception:
                 # It is not a lithops runtime
                 pass

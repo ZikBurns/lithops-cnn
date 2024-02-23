@@ -43,7 +43,7 @@ class AWSBatchBackend:
         logger.debug('Creating AWS Lambda client')
 
         self.name = 'aws_batch'
-        self.type = 'batch'
+        self.type = utils.BackendType.BATCH.value
         self.aws_batch_config = aws_batch_config
 
         self.user_key = aws_batch_config['access_key_id'][-4:]
@@ -325,7 +325,7 @@ class AWSBatchBackend:
         payload['log_level'] = logger.getEffectiveLevel()
 
         logger.debug(f'Submitting get-metadata job for runtime {runtime_name}')
-        res = self.batch_client.submit_job(
+        self.batch_client.submit_job(
             jobName=job_name,
             jobQueue=self._queue_name,
             jobDefinition=self._format_jobdef_name(runtime_name, runtime_memory),
@@ -398,7 +398,7 @@ class AWSBatchBackend:
         try:
             self.ecr_client.create_repository(repositoryName=repo_name,
                                               imageTagMutability='MUTABLE')
-        except self.ecr_client.exceptions.RepositoryAlreadyExistsException as e:
+        except self.ecr_client.exceptions.RepositoryAlreadyExistsException:
             logger.info('Repository {} already exists'.format(repo_name))
 
         logger.debug(f'Pushing runtime {full_image_name} to AWS container registry')
@@ -516,19 +516,26 @@ class AWSBatchBackend:
             rt_name, rt_mem, version = self._unformat_jobdef_name(jobdef_name=job_def['jobDefinitionName'])
             if runtime_name != 'all' and runtime_name != rt_name:
                 continue
-            runtimes.append((rt_name, rt_mem, version))
+            runtimes.append((rt_name, rt_mem, version, job_def['jobDefinitionName']))
 
         return runtimes
 
     def invoke(self, runtime_name, runtime_memory, payload):
         total_calls = payload['total_calls']
+        max_workers = payload['max_workers']
         chunksize = payload['chunksize']
+
+        # Make sure only max_workers are started
         total_workers = total_calls // chunksize + (total_calls % chunksize > 0)
+        if max_workers < total_workers:
+            chunksize = total_calls // max_workers + (total_calls % max_workers > 0)
+            total_workers = total_calls // chunksize + (total_calls % chunksize > 0)
+            payload['chunksize'] = chunksize
 
         job_name = '{}_{}'.format(self._format_jobdef_name(runtime_name, runtime_memory), payload['job_key'])
 
         if total_workers > 1:
-            res = self.batch_client.submit_job(
+            self.batch_client.submit_job(
                 jobName=job_name,
                 jobQueue=self._queue_name,
                 jobDefinition=self._format_jobdef_name(runtime_name, runtime_memory),
@@ -549,7 +556,7 @@ class AWSBatchBackend:
                 }
             )
         else:
-            res = self.batch_client.submit_job(
+            self.batch_client.submit_job(
                 jobName=job_name,
                 jobQueue=self._queue_name,
                 jobDefinition=self._format_jobdef_name(runtime_name, runtime_memory),

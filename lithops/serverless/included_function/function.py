@@ -1,4 +1,4 @@
-def lambda_function(payload):
+def default_function(payload):
     print(payload)
     # time.sleep(5)
     return {

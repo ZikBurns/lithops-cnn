@@ -29,10 +29,10 @@ import botocore
 
 from lithops.version import __version__
 from lithops.util.ssh_client import SSHClient
-from lithops.constants import COMPUTE_CLI_MSG, CACHE_DIR, SA_IMAGE_NAME_DEFAULT
+from lithops.constants import COMPUTE_CLI_MSG, CACHE_DIR
 from lithops.config import load_yaml_config, dump_yaml_config
-from lithops.standalone.utils import CLOUD_CONFIG_WORKER, CLOUD_CONFIG_WORKER_PK, ExecMode, get_host_setup_script
-from lithops.standalone.standalone import LithopsValidationError
+from lithops.standalone.utils import CLOUD_CONFIG_WORKER, CLOUD_CONFIG_WORKER_PK, StandaloneMode, get_host_setup_script
+from lithops.standalone import LithopsValidationError
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,9 @@ INSTANCE_STX_TIMEOUT = 180
 DEFAULT_UBUNTU_IMAGE = 'ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*'
 DEFAULT_UBUNTU_IMAGE_VERSION = DEFAULT_UBUNTU_IMAGE.replace('*', '202306*')
 DEFAULT_UBUNTU_ACCOUNT_ID = '099720109477'
+
+DEFAULT_LITHOPS_IMAGE_NAME = 'lithops-ubuntu-jammy-22.04-amd64-server'
+
 
 def b64s(string):
     """
@@ -58,8 +61,11 @@ class AWSEC2Backend:
         self.config = config
         self.mode = mode
         self.region_name = self.config['region']
+
+        suffix = 'vm' if self.mode == StandaloneMode.CONSUME.value else 'vpc'
         self.cache_dir = os.path.join(CACHE_DIR, self.name)
-        self.cache_file = os.path.join(self.cache_dir, self.region_name + '_data')
+        self.cache_file = os.path.join(self.cache_dir, f'{self.region_name}_{suffix}_data')
+
         self.vpc_data_type = 'provided' if 'vpc_id' in self.config else 'created'
         self.ssh_data_type = 'provided' if 'ssh_key_name' in self.config else 'created'
 
@@ -67,6 +73,8 @@ class AWSEC2Backend:
         self.vpc_name = None
         self.vpc_key = None
         self.user_key = self.config['access_key_id'][-4:].lower()
+
+        self.instance_types = {}
 
         client_config = botocore.client.Config(
             user_agent_extra=self.config['user_agent']
@@ -85,6 +93,12 @@ class AWSEC2Backend:
 
         msg = COMPUTE_CLI_MSG.format('AWS EC2')
         logger.info(f"{msg} - Region: {self.region_name}")
+
+    def is_initialized(self):
+        """
+        Checks if the backend is initialized
+        """
+        return os.path.isfile(self.cache_file)
 
     def _load_ec2_data(self):
         """
@@ -105,6 +119,13 @@ class AWSEC2Backend:
         """
         dump_yaml_config(self.cache_file, self.ec2_data)
 
+    def _delete_vpc_data(self):
+        """
+        Deletes the vpc data file
+        """
+        if os.path.exists(self.cache_file):
+            os.remove(self.cache_file)
+
     def _create_vpc(self):
         """
         Creates a new VPC
@@ -113,15 +134,16 @@ class AWSEC2Backend:
             return
 
         if 'vpc_id' in self.ec2_data:
+            logger.debug(f'Using VPC {self.ec2_data["vpc_name"]}')
             vpcs_info = self.ec2_client.describe_vpcs(VpcIds=[self.ec2_data['vpc_id']])
             if len(vpcs_info) > 0:
                 self.config['vpc_id'] = self.ec2_data['vpc_id']
                 return
 
         self.vpc_name = self.config.get('vpc_name', f'lithops-vpc-{self.user_key}-{str(uuid.uuid4())[-6:]}')
-        logger.debug(f'Setting VPC name to: {self.vpc_name}')
+        logger.debug(f'Setting VPC name to {self.vpc_name}')
 
-        assert re.match("^[a-z0-9-:-]*$", self.vpc_name),\
+        assert re.match("^[a-z0-9-:-]*$", self.vpc_name), \
             f'VPC name "{self.vpc_name}" not valid'
 
         filter = [{'Name': 'tag:Name', 'Values': [self.vpc_name]}]
@@ -131,11 +153,48 @@ class AWSEC2Backend:
 
         if 'vpc_id' not in self.config:
             logger.debug(f'Creating VPC {self.vpc_name}')
-            response = self.ec2_client.create_vpc(CidrBlock='192.168.0.0/16')
+            response = self.ec2_client.create_vpc(CidrBlock='10.0.0.0/16')
             tags = [{"Key": "Name", "Value": self.vpc_name}]
             self.ec2_client.create_tags(Resources=[response['Vpc']['VpcId']], Tags=tags)
 
             self.config['vpc_id'] = response['Vpc']['VpcId']
+
+    def _create_subnets(self):
+        """
+        Creates a public and a private subnets
+        """
+        if 'public_subnet_id' in self.config:
+            return
+
+        if 'public_subnet_id' in self.ec2_data:
+            sg_info = self.ec2_client.describe_subnets(
+                SubnetIds=[self.ec2_data['public_subnet_id']]
+            )
+            if len(sg_info) > 0:
+                self.config['public_subnet_id'] = self.ec2_data['public_subnet_id']
+
+        if 'public_subnet_id' not in self.config:
+            logger.debug(f'Creating new public subnet in VPC {self.vpc_name}')
+            response = self.ec2_client.create_subnet(
+                CidrBlock='10.0.1.0/24', VpcId=self.config['vpc_id'],
+            )
+            public_subnet_id = response['Subnet']['SubnetId']
+            self.config['public_subnet_id'] = public_subnet_id
+
+        # if 'private_subnet_id' in self.ec2_data:
+        #     sg_info = self.ec2_client.describe_subnets(
+        #         SubnetIds=[self.ec2_data['private_subnet_id']]
+        #     )
+        #     if len(sg_info) > 0:
+        #         self.config['private_subnet_id'] = self.ec2_data['private_subnet_id']
+        #
+        # if 'private_subnet_id' not in self.config:
+        #     logger.debug(f'Creating new private subnet in VPC {self.vpc_name}')
+        #     response = self.ec2_client.create_subnet(
+        #         CidrBlock='10.0.2.0/24', VpcId=self.config['vpc_id']
+        #     )
+        #     private_subnet_id = response['Subnet']['SubnetId']
+        #     self.config['private_subnet_id'] = private_subnet_id
 
     def _create_internet_gateway(self):
         """
@@ -145,7 +204,9 @@ class AWSEC2Backend:
             return
 
         if 'internet_gateway_id' in self.ec2_data:
-            ig_info = self.ec2_client.describe_internet_gateways(InternetGatewayIds=[self.ec2_data['internet_gateway_id']])
+            ig_info = self.ec2_client.describe_internet_gateways(
+                InternetGatewayIds=[self.ec2_data['internet_gateway_id']]
+            )
             if len(ig_info) > 0:
                 self.config['internet_gateway_id'] = self.ec2_data['internet_gateway_id']
                 return
@@ -157,46 +218,119 @@ class AWSEC2Backend:
 
         if 'internet_gateway_id' not in self.config:
             # Create and Attach the Internet Gateway
+            logger.debug(f'Creating Internet Gateway in VPC {self.vpc_name}')
             response = self.ec2_client.create_internet_gateway()
             internet_gateway_id = response['InternetGateway']['InternetGatewayId']
-            self.ec2_client.attach_internet_gateway(VpcId=self.config['vpc_id'], InternetGatewayId=internet_gateway_id)
+            self.ec2_client.attach_internet_gateway(
+                VpcId=self.config['vpc_id'], InternetGatewayId=internet_gateway_id
+            )
             self.config['internet_gateway_id'] = internet_gateway_id
 
-            # Create a public route to Internet Gateway
+    def _create_nat_gateway(self):
+        """
+        Creates a new internet gateway
+        """
+        if 'nat_gateway_id' in self.config:
+            return
+
+        if 'nat_gateway_id' in self.ec2_data:
+            ig_info = self.ec2_client.describe_nat_gateways(
+                NatGatewayIds=[self.ec2_data['nat_gateway_id']]
+            )
+            if len(ig_info) > 0:
+                self.config['nat_gateway_id'] = self.ec2_data['nat_gateway_id']
+                return
+
+        response = self.ec2_client.describe_nat_gateways()
+        for ng in response['NatGateways']:
+            if ng['SubnetId'] == self.config['public_subnet_id']:
+                self.config['nat_gateway_id'] = ng['NatGatewayId']
+
+        if 'nat_gateway_id' not in self.config:
+            logger.debug(f'Creating NAT Gateway in VPC {self.vpc_name}')
+            # Create an Elastic IP address for the NAT Gateway
+            # Create the NAT gateway can take up to 2 minutes
+            # TODO: Reuse Elastic IP adress if available
+            eip_resp = self.ec2_client.allocate_address(Domain='vpc')
+            allocation_id = eip_resp['AllocationId']
+
+            # Create a NAT Gateway
+            nat_gateway_resp = self.ec2_client.create_nat_gateway(
+                SubnetId=self.config['public_subnet_id'],
+                AllocationId=allocation_id
+            )
+            nat_gateway_id = nat_gateway_resp['NatGateway']['NatGatewayId']
+            self.config['nat_gateway_id'] = nat_gateway_id
+
+            self.ec2_client.get_waiter('nat_gateway_available').wait(
+                NatGatewayIds=[nat_gateway_id],
+                WaiterConfig={'Delay': 5, 'MaxAttempts': 40}
+            )
+
+    def _create_routing_tables(self):
+        """
+        Creates the routing tables
+        """
+        if 'public_rtb_id' in self.config:
+            return
+
+        if 'public_rtb_id' in self.ec2_data:
+            sg_info = self.ec2_client.describe_route_tables(
+                RouteTableIds=[self.ec2_data['public_rtb_id']]
+            )
+            if len(sg_info) > 0:
+                self.config['public_rtb_id'] = self.ec2_data['public_rtb_id']
+
+        if 'public_rtb_id' not in self.config:
+            logger.debug(f'Creating public routing table in VPC {self.vpc_name}')
+            # The default RT is the public RT
             response = self.ec2_client.describe_route_tables()
             for rt in response['RouteTables']:
                 if rt['VpcId'] == self.config['vpc_id']:
-                    route_table_id = rt['RouteTableId']
-            self.ec2_client.create_route(
-                DestinationCidrBlock='0.0.0.0/0',
-                GatewayId=internet_gateway_id,
-                RouteTableId=route_table_id
+                    publ_route_table_id = rt['RouteTableId']
+            self.ec2_client.create_tags(
+                Resources=[publ_route_table_id],
+                Tags=[{'Key': 'Name', 'Value': f'{self.vpc_name}-publ'}]
             )
+            self.ec2_client.associate_route_table(
+                RouteTableId=publ_route_table_id,
+                SubnetId=self.config['public_subnet_id']
+            )
+            self.ec2_client.create_route(
+                RouteTableId=publ_route_table_id,
+                DestinationCidrBlock='0.0.0.0/0',
+                GatewayId=self.config['internet_gateway_id']
+            )
+            self.config['public_rtb_id'] = publ_route_table_id
 
-    def _create_subnet(self):
-        """
-        Creates a new Subnet
-        """
-        if 'subnet_id' in self.config:
-            return
-
-        if 'subnet_id' in self.ec2_data:
-            sg_info = self.ec2_client.describe_subnets(SubnetIds=[self.ec2_data['subnet_id']])
-            if len(sg_info) > 0:
-                self.config['subnet_id'] = self.ec2_data['subnet_id']
-                return
-
-        response = self.ec2_client.describe_subnets()
-        for subnet in response['Subnets']:
-            if subnet['VpcId'] == self.config['vpc_id']:
-                subnet_id = subnet['SubnetId']
-                self.config['subnet_id'] = subnet_id
-
-        if 'subnet_id' not in self.config:
-            logger.debug(f'Creating new subnet in VPC {self.vpc_name}')
-            response = self.ec2_client.create_subnet(CidrBlock='192.168.0.0/16', VpcId=self.config['vpc_id'])
-            subnet_id = response['Subnet']['SubnetId']
-            self.config['subnet_id'] = subnet_id
+        # if 'private_rtb_id' in self.ec2_data:
+        #     sg_info = self.ec2_client.describe_route_tables(
+        #         RouteTableIds=[self.ec2_data['private_rtb_id']]
+        #     )
+        #     if len(sg_info) > 0:
+        #         self.config['private_rtb_id'] = self.ec2_data['private_rtb_id']
+        #
+        # if 'private_rtb_id' not in self.config:
+        #     logger.debug(f'Creating private routing table in VPC {self.vpc_name}')
+        #     # Create private RT
+        #     priv_route_table_resp = self.ec2_client.create_route_table(
+        #         VpcId=self.config['vpc_id']
+        #     )
+        #     priv_route_table_id = priv_route_table_resp['RouteTable']['RouteTableId']
+        #     self.ec2_client.create_tags(
+        #         Resources=[priv_route_table_id],
+        #         Tags=[{'Key': 'Name', 'Value': f'{self.vpc_name}-priv'}]
+        #     )
+        #     self.ec2_client.associate_route_table(
+        #         RouteTableId=priv_route_table_id,
+        #         SubnetId=self.config['private_subnet_id']
+        #     )
+        #     self.ec2_client.create_route(
+        #         RouteTableId=priv_route_table_id,
+        #         DestinationCidrBlock='0.0.0.0/0',
+        #         GatewayId=self.config['nat_gateway_id']
+        #     )
+        #     self.config['private_rtb_id'] = priv_route_table_id
 
     def _create_security_group(self):
         """
@@ -206,7 +340,9 @@ class AWSEC2Backend:
             return
 
         if 'security_group_id' in self.ec2_data:
-            sg_info = self.ec2_client.describe_security_groups(GroupIds=[self.ec2_data['security_group_id']])
+            sg_info = self.ec2_client.describe_security_groups(
+                GroupIds=[self.ec2_data['security_group_id']]
+            )
             if len(sg_info) > 0:
                 self.config['security_group_id'] = self.ec2_data['security_group_id']
                 return
@@ -217,7 +353,7 @@ class AWSEC2Backend:
                 self.config['security_group_id'] = sg['GroupId']
 
         if 'security_group_id' not in self.config:
-            logger.debug(f'Creating new security group in VPC {self.vpc_name}')
+            logger.debug(f'Creating Security Group in VPC {self.vpc_name}')
             response = self.ec2_client.create_security_group(
                 GroupName=self.vpc_name,
                 Description=self.vpc_name,
@@ -230,7 +366,7 @@ class AWSEC2Backend:
                     {'IpProtocol': 'tcp',
                         'FromPort': 8080,
                         'ToPort': 8080,
-                        'IpRanges': [{'CidrIp': '192.168.0.0/16'}]},
+                        'IpRanges': [{'CidrIp': '10.0.0.0/16'}]},
                     {'IpProtocol': 'tcp',
                         'FromPort': 22,
                         'ToPort': 22,
@@ -293,12 +429,12 @@ class AWSEC2Backend:
             response = self.ec2_client.describe_images(Filters=[
                 {
                     'Name': 'name',
-                    'Values': [SA_IMAGE_NAME_DEFAULT]
+                    'Values': [DEFAULT_LITHOPS_IMAGE_NAME]
                 }])
 
             for image in response['Images']:
-                if image['Name'] == SA_IMAGE_NAME_DEFAULT:
-                    logger.debug(f"Found default AMI: {SA_IMAGE_NAME_DEFAULT}")
+                if image['Name'] == DEFAULT_LITHOPS_IMAGE_NAME:
+                    logger.debug(f"Found default AMI: {DEFAULT_LITHOPS_IMAGE_NAME}")
                     self.config['target_ami'] = image['ImageId']
                     break
 
@@ -317,7 +453,7 @@ class AWSEC2Backend:
         """
         name = self.config.get('master_name') or f'lithops-master-{self.vpc_key}'
         self.master = EC2Instance(name, self.config, self.ec2_client, public=True)
-        self.master.instance_id = self.config['instance_id'] if self.mode == ExecMode.CONSUME.value else None
+        self.master.instance_id = self.config['instance_id'] if self.mode == StandaloneMode.CONSUME.value else None
         self.master.instance_type = self.config['master_instance_type']
         self.master.delete_on_dismantle = False
         self.master.ssh_credentials.pop('password')
@@ -341,6 +477,35 @@ class AWSEC2Backend:
             self.config["spot_price"] = max(spot_prices)
             logger.debug(f'Current spot instance price for {wit} is ${self.config["spot_price"]}')
 
+    def _get_all_instance_types(self):
+        """
+        Gets all instance types and their CPU COUNT
+        """
+        if 'instance_types' in self.ec2_data:
+            self.instance_types = self.ec2_data['instance_types']
+            return
+
+        instances = {}
+        next_token = None
+
+        while True:
+            if next_token:
+                response = self.ec2_client.describe_instance_types(NextToken=next_token)
+            else:
+                response = self.ec2_client.describe_instance_types()
+
+            for instance_type in response['InstanceTypes']:
+                instance_name = instance_type['InstanceType']
+                cpu_count = instance_type['VCpuInfo']['DefaultVCpus']
+                instances[instance_name] = cpu_count
+
+            next_token = response.get('NextToken')
+
+            if not next_token:
+                break
+
+        self.instance_types = instances
+
     def init(self):
         """
         Initialize the backend by defining the Master VM
@@ -348,10 +513,8 @@ class AWSEC2Backend:
         logger.debug(f'Initializing AWS EC2 backend ({self.mode} mode)')
 
         self._load_ec2_data()
-        if self.mode != self.ec2_data.get('mode'):
-            self.ec2_data = {}
 
-        if self.mode == ExecMode.CONSUME.value:
+        if self.mode == StandaloneMode.CONSUME.value:
             ins_id = self.config['instance_id']
             if not self.ec2_data or ins_id != self.ec2_data.get('instance_id'):
                 instances = self.ec2_client.describe_instances(InstanceIds=[ins_id])
@@ -372,7 +535,7 @@ class AWSEC2Backend:
                 'master_id': self.master.instance_id
             }
 
-        elif self.mode in [ExecMode.CREATE.value, ExecMode.REUSE.value]:
+        elif self.mode in [StandaloneMode.CREATE.value, StandaloneMode.REUSE.value]:
 
             # Create the VPC if not exists
             self._create_vpc()
@@ -380,10 +543,14 @@ class AWSEC2Backend:
             # Set the suffix used for the VPC resources
             self.vpc_key = self.config['vpc_id'][-6:]
 
+            # Create the Subnet if not exists
+            self._create_subnets()
             # Create the internet gateway if not exists
             self. _create_internet_gateway()
-            # Create the Subnet if not exists
-            self._create_subnet()
+            # Create the NAT gateway
+            # self._create_nat_gateway()
+            # Create routing tables
+            self._create_routing_tables()
             # Create the security group if not exists
             self._create_security_group()
             # Create the ssh key pair if not exists
@@ -392,6 +559,8 @@ class AWSEC2Backend:
             self._request_image_id()
             # Request SPOT price
             self._request_spot_price()
+            # Request instance types
+            self._get_all_instance_types()
 
             # Create the master VM instance
             self._create_master_instance()
@@ -408,9 +577,14 @@ class AWSEC2Backend:
                 'target_ami': self.config['target_ami'],
                 'ssh_key_name': self.config['ssh_key_name'],
                 'ssh_key_filename': self.config['ssh_key_filename'],
-                'subnet_id': self.config['subnet_id'],
+                'public_subnet_id': self.config['public_subnet_id'],
+                # 'private_subnet_id': self.config['private_subnet_id'],
                 'security_group_id': self.config['security_group_id'],
-                'internet_gateway_id': self.config['internet_gateway_id']
+                'internet_gateway_id': self.config['internet_gateway_id'],
+                # 'nat_gateway_id': self.config['nat_gateway_id'],
+                # 'private_rtb_id': self.config['private_rtb_id'],
+                'public_rtb_id': self.config['public_rtb_id'],
+                'instance_types': self.instance_types
             }
 
         self._dump_ec2_data()
@@ -419,18 +593,18 @@ class AWSEC2Backend:
         """
         Builds a new VM Image
         """
+        image_name = image_name or DEFAULT_LITHOPS_IMAGE_NAME
+
         images = self.ec2_client.describe_images(Filters=[
             {
                 'Name': 'name',
                 'Values': [image_name]
             }])['Images']
+
         if len(images) > 0:
             image_id = images[0]['ImageId']
             if overwrite:
-                logger.debug(f"Deleting existing VM Image '{image_name}'")
-                self.ec2_client.deregister_image(ImageId=image_id)
-                while len(self.ec2_client.describe_images(Filters=[{'Name': 'name', 'Values': [image_name]}])['Images']) > 0:
-                    time.sleep(2)
+                self.delete_image(image_name)
             else:
                 raise Exception(f"The image with name '{image_name}' already exists with ID: '{image_id}'."
                                 " Use '--overwrite' or '-o' if you want ot overwrite it")
@@ -438,7 +612,7 @@ class AWSEC2Backend:
         initial_vpc_data = self._load_ec2_data()
         self.init()
 
-        build_vm = EC2Instance(image_name, self.config, self.ec2_client, public=True)
+        build_vm = EC2Instance('building-image-' + image_name, self.config, self.ec2_client, public=True)
         build_vm.delete_on_dismantle = False
         build_vm.create()
         build_vm.wait_ready()
@@ -471,6 +645,7 @@ class AWSEC2Backend:
             Description='Lithops Image'
         )
 
+        logger.debug("Starting VM image creation")
         logger.debug("Be patient, VM imaging can take up to 5 minutes")
 
         while True:
@@ -481,12 +656,34 @@ class AWSEC2Backend:
                     break
             time.sleep(20)
 
-        build_vm.delete()
-
         if not initial_vpc_data:
-            self.clean(all)
+            while not self.clean(all=True):
+                time.sleep(5)
+        else:
+            build_vm.delete()
 
         logger.info(f"VM Image created. Image ID: {images[0]['ImageId']}")
+
+    def delete_image(self, image_name):
+        """
+        Deletes a VM Image
+        """
+        def list_images():
+            return self.ec2_client.describe_images(Filters=[
+                {
+                    'Name': 'name',
+                    'Values': [image_name]
+                }])['Images']
+
+        images = list_images()
+
+        if len(images) > 0:
+            image_id = images[0]['ImageId']
+            logger.debug(f"Deleting existing VM Image '{image_name}'")
+            self.ec2_client.deregister_image(ImageId=image_id)
+            while len(list_images()) > 0:
+                time.sleep(2)
+            logger.debug(f"VM Image '{image_name}' successfully deleted")
 
     def list_images(self):
         """
@@ -521,7 +718,7 @@ class AWSEC2Backend:
                if self.vpc_name else 'Deleting all Lithops worker VMs')
         logger.info(msg)
 
-        vms_prefixes = ('lithops-worker', 'lithops-master') if all else ('lithops-worker',)
+        vms_prefixes = ('lithops-worker', 'lithops-master', 'building-image') if all else ('lithops-worker',)
 
         ins_to_delete = []
         response = self.ec2_client.describe_instances()
@@ -532,13 +729,13 @@ class AWSEC2Backend:
                     for tag in ins['Tags']:
                         if tag['Key'] == 'Name' and tag['Value'].startswith(vms_prefixes):
                             ins_to_delete.append(ins['InstanceId'])
-                            logger.debug(f"Going to delete VM instance {tag['Value']}")
+                            logger.debug(f"Going to delete VM instance {tag['Value']} ({ins['InstanceId']})")
 
         if ins_to_delete:
             self.ec2_client.terminate_instances(InstanceIds=ins_to_delete)
 
         master_pk = os.path.join(self.cache_dir, f"{self.ec2_data['master_name']}-id_rsa.pub")
-        if os.path.isfile(master_pk):
+        if all and os.path.isfile(master_pk):
             os.remove(master_pk)
 
         if self.ec2_data['vpc_data_type'] == 'provided':
@@ -570,6 +767,7 @@ class AWSEC2Backend:
 
         total_correct = 0
 
+        # Security Group
         try:
             logger.debug(f"Deleting security group {self.ec2_data['security_group_id']}")
             self.ec2_client.delete_security_group(
@@ -577,46 +775,87 @@ class AWSEC2Backend:
             )
             total_correct += 1
         except ClientError as e:
-            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400:
+            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400 and \
+               'does not exist' in e.response['Error']['Message']:
                 total_correct += 1
             logger.debug(e.response['Error']['Message'])
+
+        # NAT Gateway
+        # try:
+        #     logger.debug(f"Deleting nat gateway {self.ec2_data['nat_gateway_id']}")
+        #     self.ec2_client.delete_nat_gateway(
+        #         NatGatewayId=self.ec2_data['nat_gateway_id']
+        #     )
+        #     self.ec2_client.get_waiter('nat_gateway_deleted').wait(
+        #         NatGatewayIds=[self.ec2_data['nat_gateway_id']],
+        #         WaiterConfig={'Delay': 5, 'MaxAttempts': 40}
+        #     )
+        #     total_correct += 1
+        # except ClientError as e:
+        #     if e.response['ResponseMetadata']['HTTPStatusCode'] == 400 and \
+        #        'does not exist' in e.response['Error']['Message']:
+        #         total_correct += 1
+        #     logger.debug(e.response['Error']['Message'])
+
+        # Subnets
         try:
-            logger.debug(f"Deleting {self.ec2_data['subnet_id']}")
-            self.ec2_client.delete_subnet(SubnetId=self.ec2_data['subnet_id'])
+            logger.debug(f"Deleting public {self.ec2_data['public_subnet_id']}")
+            self.ec2_client.delete_subnet(SubnetId=self.ec2_data['public_subnet_id'])
             total_correct += 1
         except ClientError as e:
-            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400:
+            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400 and \
+               'does not exist' in e.response['Error']['Message']:
                 total_correct += 1
             logger.debug(e.response['Error']['Message'])
+        # try:
+        #     logger.debug(f"Deleting private {self.ec2_data['private_subnet_id']}")
+        #     self.ec2_client.delete_subnet(SubnetId=self.ec2_data['private_subnet_id'])
+        #     total_correct += 1
+        # except ClientError as e:
+        #     if e.response['ResponseMetadata']['HTTPStatusCode'] == 400 and \
+        #        'does not exist' in e.response['Error']['Message']:
+        #         total_correct += 1
+        #     logger.debug(e.response['Error']['Message'])
+
+        # Internet gateway
         try:
-            logger.debug(f"Deleting internet gateway {self.ec2_data['internet_gateway_id']}")
+            logger.debug(f"Detaching internet gateway {self.ec2_data['internet_gateway_id']}")
             self.ec2_client.detach_internet_gateway(
                 InternetGatewayId=self.ec2_data['internet_gateway_id'],
                 VpcId=self.ec2_data['vpc_id'])
             total_correct += 1
         except ClientError as e:
-            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400:
+            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400 and \
+               'does not exist' in e.response['Error']['Message']:
                 total_correct += 1
             logger.debug(e.response['Error']['Message'])
         try:
+            logger.debug(f"Deleting internet gateway {self.ec2_data['internet_gateway_id']}")
             self.ec2_client.delete_internet_gateway(
                 InternetGatewayId=self.ec2_data['internet_gateway_id']
             )
             total_correct += 1
         except ClientError as e:
-            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400:
+            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400 and \
+               'does not exist' in e.response['Error']['Message']:
                 total_correct += 1
             logger.debug(e.response['Error']['Message'])
+
+        # VPC
         try:
             logger.debug(f"Deleting VPC {self.ec2_data['vpc_id']}")
             self.ec2_client.delete_vpc(VpcId=self.ec2_data['vpc_id'])
             total_correct += 1
         except ClientError as e:
-            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400:
+            if e.response['ResponseMetadata']['HTTPStatusCode'] == 400 and \
+               'does not exist' in e.response['Error']['Message']:
                 total_correct += 1
             logger.debug(e.response['Error']['Message'])
 
-        assert total_correct == 5, "Couldn't delete all the VPC resources, try againg in a few seconds"
+        if total_correct < 5:
+            logger.error("Couldn't delete all the VPC resources, try againg in a few seconds")
+
+        return total_correct == 5
 
     def _delete_ssh_key(self):
         """
@@ -648,17 +887,20 @@ class AWSEC2Backend:
         self._load_ec2_data()
 
         if not self.ec2_data:
-            return
+            return True
 
-        if self.ec2_data['mode'] == ExecMode.CONSUME.value:
-            if os.path.exists(self.cache_file):
-                os.remove(self.cache_file)
+        if self.mode == StandaloneMode.CONSUME.value:
+            self._delete_vpc_data()
+            return True
         else:
             self._delete_vm_instances(all=all)
-            self._delete_vpc() if all else None
-            self._delete_ssh_key() if all else None
-            if all and os.path.exists(self.cache_file):
-                os.remove(self.cache_file)
+            if all:
+                if self._delete_vpc():
+                    self._delete_ssh_key()
+                    self._delete_vpc_data()
+                    return True
+                else:
+                    return False
 
     def clear(self, job_keys=None):
         """
@@ -676,7 +918,7 @@ class AWSEC2Backend:
                 ex.map(lambda worker: worker.stop(), self.workers)
             self.workers = []
 
-        if include_master or self.mode == ExecMode.CONSUME.value:
+        if include_master or self.mode == StandaloneMode.CONSUME.value:
             # in consume mode master VM is a worker
             self.master.stop()
 
@@ -693,6 +935,18 @@ class AWSEC2Backend:
 
         return instance
 
+    def get_worker_instance_type(self):
+        """
+        Return the worker instance type
+        """
+        return self.config['worker_instance_type']
+
+    def get_worker_cpu_count(self):
+        """
+        Returns the number of CPUs in the worker instance type
+        """
+        return self.instance_types[self.config['worker_instance_type']]
+
     def create_worker(self, name):
         """
         Creates a new worker VM instance
@@ -706,9 +960,10 @@ class AWSEC2Backend:
             with open(pub_key, 'r') as pk:
                 pk_data = pk.read().strip()
             user_data = CLOUD_CONFIG_WORKER_PK.format(user, pk_data)
-            worker.ssh_credentials['key_filename'] = '~/.ssh/id_rsa'
+            worker.ssh_credentials['key_filename'] = '~/.ssh/lithops_id_rsa'
             worker.ssh_credentials.pop('password')
         else:
+            logger.error(f'Unable to locate {pub_key}')
             worker.ssh_credentials.pop('key_filename')
             token = worker.ssh_credentials['password']
             user_data = CLOUD_CONFIG_WORKER.format(user, token)
@@ -734,6 +989,10 @@ class EC2Instance:
         """
         self.name = name.lower()
         self.config = ec2_config
+        self.metadata = {}
+
+        self.status = None
+        self.err = None
 
         self.delete_on_dismantle = self.config['delete_on_dismantle']
         self.instance_type = self.config['worker_instance_type']
@@ -750,6 +1009,8 @@ class EC2Instance:
         self.public_ip = '0.0.0.0'
         self.fast_io = self.config.get('fast_io', False)
         self.home_dir = '/home/ubuntu'
+
+        self.runtime_name = None
 
         self.ssh_credentials = {
             'username': self.config['ssh_username'],
@@ -897,7 +1158,7 @@ class EC2Instance:
         LaunchSpecification['NetworkInterfaces'] = [{
             'AssociatePublicIpAddress': True,
             'DeviceIndex': 0,
-            'SubnetId': self.config['subnet_id'],
+            'SubnetId': self.config['public_subnet_id'],
             'Groups': [self.config['security_group_id']]
         }]
 
@@ -1055,7 +1316,7 @@ class EC2Instance:
         """
         Starts the VM instance
         """
-        logger.info(f"Starting VM instance {self.name}")
+        logger.info(f"Starting VM instance {self.name} ({self.instance_id})")
 
         try:
             self.ec2_client.start_instances(InstanceIds=[self.instance_id])
@@ -1072,7 +1333,7 @@ class EC2Instance:
         """
         Deletes the VM instance and the associated volume
         """
-        logger.debug(f"Deleting VM instance {self.name}")
+        logger.debug(f"Deleting VM instance {self.name} ({self.instance_id})")
 
         self.ec2_client.terminate_instances(InstanceIds=[self.instance_id])
 
@@ -1086,7 +1347,7 @@ class EC2Instance:
         """
         Stops the VM instance
         """
-        logger.debug(f"Stopping VM instance {self.name}")
+        logger.debug(f"Stopping VM instance {self.name} ({self.instance_id})")
         self.ec2_client.stop_instances(InstanceIds=[self.instance_id])
 
     def stop(self):

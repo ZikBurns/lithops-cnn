@@ -24,7 +24,6 @@ import logging
 import urllib3
 import copy
 import yaml
-import shutil
 from kubernetes import client, watch
 from kubernetes.config import load_incluster_config
 from kubernetes.client.rest import ApiException
@@ -41,6 +40,7 @@ urllib3.disable_warnings()
 
 logger = logging.getLogger(__name__)
 
+
 # Decorator to wrap a function to reinit clients and retry on except.
 def retry_on_except(func):
     def decorated_func(*args, **kwargs):
@@ -55,6 +55,7 @@ def retry_on_except(func):
                     return func(*args, **kwargs)
                 except ApiException as e:
                     if e.status == 409:
+                        ex = e
                         body = json.loads(e.body)
                         if body.get('reason') in {'AlreadyExists', 'Conflict'} or 'already exists' in body.get('message'):
                             logger.debug("Encountered conflict error {}, ignoring".format(body.get('message')))
@@ -78,7 +79,7 @@ class CodeEngineBackend:
     def __init__(self, ce_config, internal_storage):
         logger.debug("Creating IBM Code Engine client")
         self.name = 'code_engine'
-        self.type = 'batch'
+        self.type = utils.BackendType.BATCH.value
         self.config = ce_config
         self.internal_storage = internal_storage
         self.is_lithops_worker = utils.is_lithops_worker()
@@ -91,6 +92,8 @@ class CodeEngineBackend:
         self.user_key = self.iam_api_key[:4].lower()
         self.project_name = ce_config.get('project_name', f'lithops-{self.region}-{self.user_key}')
         self.project_id = None
+
+        self.config['project_name'] = self.project_name
 
         self.token_manager = None
         self.code_engine_service_v1 = None
@@ -108,13 +111,6 @@ class CodeEngineBackend:
             self.core_api = client.CoreV1Api()
         else:
             self._create_k8s_iam_client()
-
-        if not self.namespace and not self.is_lithops_worker:
-            self._get_or_create_namespace()
-            self.config['namespace'] = self.namespace
-
-        logger.debug(f"Set namespace to {self.namespace}")
-        logger.debug(f"Set cluster to {self.cluster}")
 
         self.jobs = []  # list to store executed jobs (job_keys)
 
@@ -138,16 +134,21 @@ class CodeEngineBackend:
         self.code_engine_service_v2 = CodeEngineV2(authenticator=authenticator)
         self.code_engine_service_v2.set_service_url(config.BASE_URL_V2.format(self.region))
 
-    def _get_or_create_namespace(self):
+    def _get_or_create_namespace(self, create=True):
         """
         Gets or creates a new namespace
         """
+        if self.namespace or self.is_lithops_worker:
+            return self.namespace
+
         ce_data = load_yaml_config(self.cache_file)
         self.namespace = ce_data.get('namespace')
         self.project_id = ce_data.get('project_id')
+        self.config['project_id'] = self.project_id
+        self.config['namespace'] = self.namespace
 
         if self.namespace:
-            return
+            return self.namespace
 
         self._create_code_engine_client()
 
@@ -175,8 +176,10 @@ class CodeEngineBackend:
                     logger.debug(f"Found Code Engine project: {self.project_name}")
                     self.project_id = project['id']
                     self.namespace = get_k8s_namespace(self.project_id)
+                    self.config['project_id'] = self.project_id
+                    self.config['namespace'] = self.namespace
 
-        if not self.namespace:
+        if not self.namespace and create:
             logger.debug(f"Creating new Code Engine project: {self.project_name}")
             response = self.code_engine_service_v2.create_project(
                 name=self.project_name,
@@ -185,11 +188,15 @@ class CodeEngineBackend:
             project = response.get_result()
             self.project_id = project['id']
             self.namespace = get_k8s_namespace(self.project_id)
+            self.config['project_id'] = self.project_id
+            self.config['namespace'] = self.namespace
 
         ce_data['project_name'] = self.project_name
         ce_data['project_id'] = self.project_id
         ce_data['namespace'] = self.namespace
         dump_yaml_config(self.cache_file, ce_data)
+
+        return self.namespace
 
     def _create_k8s_iam_client(self):
         """
@@ -218,7 +225,7 @@ class CodeEngineBackend:
         name = f'{runtime_name}-{runtime_memory}-{version}'
         name_hash = hashlib.sha1(name.encode("utf-8")).hexdigest()[:10]
 
-        return f'lithops-worker-{version.replace(".", "")}-{name_hash}'
+        return f'lithops-worker-{self.user_key}-{version.replace(".", "")}-{name_hash}'
 
     def _get_default_runtime_image_name(self):
         """
@@ -257,6 +264,7 @@ class CodeEngineBackend:
         logger.debug(f'Pushing runtime {docker_image_name} to container registry')
 
         if docker_user and docker_password:
+            logger.debug('Container registry credentials found in config. Logging in into the registry')
             cmd = f'{docker_path} login -u {docker_user} --password-stdin {docker_server}'
             utils.run_command(cmd, input=docker_password)
 
@@ -286,6 +294,8 @@ class CodeEngineBackend:
         """
         Deploys a new runtime from an already built Docker image
         """
+        self._get_or_create_namespace()
+
         try:
             default_image_name = self._get_default_runtime_image_name()
         except Exception:
@@ -306,6 +316,10 @@ class CodeEngineBackend:
         Deletes a runtime
         We need to delete job definition
         """
+        if not self._get_or_create_namespace(create=False):
+            logger.info(f"Project {self.project_name} does not exist")
+            return
+
         logger.info(f'Deleting runtime: {runtime_name} - {memory}MB')
         self._create_k8s_iam_client()
         try:
@@ -325,10 +339,17 @@ class CodeEngineBackend:
         """
         Deletes all runtimes from all packages
         """
+        logger.info(f'Cleaning project {self.project_name}')
+        if not self._get_or_create_namespace(create=False):
+            logger.info(f"Project {self.project_name} does not exist")
+            if os.path.exists(self.cache_file):
+                os.remove(self.cache_file)
+            return
+
         self._create_k8s_iam_client()
         self.clear()
         runtimes = self.list_runtimes()
-        for image_name, memory, version in runtimes:
+        for image_name, memory, version, fn_name in runtimes:
             self.delete_runtime(image_name, memory, version)
 
         logger.debug('Deleting all lithops configmaps')
@@ -344,19 +365,23 @@ class CodeEngineBackend:
 
         if all and os.path.exists(self.cache_file):
             self._create_code_engine_client()
-            logger.debug(f"Deleting Code Engine project: {self.project_name}")
+            logger.info(f"Deleting Code Engine project: {self.project_name}")
             self.code_engine_service_v2.delete_project(id=self.project_id)
             os.remove(self.cache_file)
-
-        shutil.rmtree(self.cache_dir, ignore_errors=True)
 
     def list_runtimes(self, docker_image_name='all'):
         """
         List all the runtimes
         return: list of tuples (docker_image_name, memory)
         """
-        self._create_k8s_iam_client()
         runtimes = []
+
+        if not self._get_or_create_namespace(create=False):
+            logger.info(f"Project {self.project_name} does not exist")
+            return runtimes
+
+        self._create_k8s_iam_client()
+
         try:
             jobdefs = self.custom_api.list_namespaced_custom_object(
                 group=config.DEFAULT_GROUP,
@@ -370,14 +395,18 @@ class CodeEngineBackend:
 
         for jobdef in jobdefs['items']:
             try:
-                if jobdef['metadata']['labels']['type'] == 'lithops-runtime':
-                    version = jobdef['metadata']['labels']['version'].replace('lithops_v', '')
-                    container = jobdef['spec']['template']['containers'][0]
-                    image_name = container['image']
-                    memory = container['resources']['requests']['memory'].replace('M', '')
-                    memory = int(int(memory) / 1000 * 1024)
-                    if docker_image_name in image_name or docker_image_name == 'all':
-                        runtimes.append((image_name, memory, version))
+                if not jobdef['metadata']['name'].startswith(f'lithops-worker-{self.user_key}'):
+                    continue
+                if not jobdef['metadata']['labels']['type'] == 'lithops-runtime':
+                    continue
+                fn_name = jobdef['metadata']['name']
+                version = jobdef['metadata']['labels']['version'].replace('lithops_v', '')
+                container = jobdef['spec']['template']['containers'][0]
+                image_name = container['image']
+                memory = container['resources']['requests']['memory'].replace('M', '')
+                memory = int(int(memory) / 1000 * 1024)
+                if docker_image_name in image_name or docker_image_name == 'all':
+                    runtimes.append((image_name, memory, version, fn_name))
             except Exception:
                 pass
 
@@ -387,6 +416,10 @@ class CodeEngineBackend:
         """
         Clean all completed jobruns in the current executor
         """
+        if not self._get_or_create_namespace(create=False):
+            logger.info(f"Project {self.project_name} does not exist")
+            return
+
         self._create_k8s_iam_client()
         jobs_to_delete = job_keys or self.jobs
         for job_key in jobs_to_delete:
@@ -413,6 +446,7 @@ class CodeEngineBackend:
         Invoke -- return information about this invocation
         For array jobs only remote_invocator is allowed
         """
+        self._get_or_create_namespace()
         self._create_k8s_iam_client()
 
         executor_id = job_payload['executor_id']
@@ -423,12 +457,19 @@ class CodeEngineBackend:
 
         total_calls = job_payload['total_calls']
         chunksize = job_payload['chunksize']
+        max_workers = job_payload['max_workers']
+
+        # Make sure only max_workers are started
         total_workers = total_calls // chunksize + (total_calls % chunksize > 0)
+        if max_workers < total_workers:
+            chunksize = total_calls // max_workers + (total_calls % max_workers > 0)
+            total_workers = total_calls // chunksize + (total_calls % chunksize > 0)
+            job_payload['chunksize'] = chunksize
 
         jobdef_name = self._format_jobdef_name(docker_image_name, runtime_memory)
 
         if not self._job_def_exists(jobdef_name):
-            jobdef_name = self._create_job_definition(docker_image_name, runtime_memory, jobdef_name)
+            jobdef_name = self._create_job_definition(docker_image_name, runtime_memory)
 
         jobrun_res = yaml.safe_load(config.JOBRUN_DEFAULT)
 
@@ -456,7 +497,7 @@ class CodeEngineBackend:
 
         self._run_job(jobrun_res)
 
-        # logger.debug("response - {}".format(res))
+        # logger.debug(f"response - {res}")
 
         return activation_id
 
@@ -508,7 +549,7 @@ class CodeEngineBackend:
 
         try:
             self.core_api.delete_namespaced_secret("lithops-regcred", self.namespace)
-        except ApiException as e:
+        except ApiException:
             pass
 
         try:
@@ -518,18 +559,20 @@ class CodeEngineBackend:
                 raise e
 
     @retry_on_except
-    def _create_job_definition(self, docker_image_name, runtime_memory, timeout):
+    def _create_job_definition(self, docker_image_name, runtime_memory, timeout=None):
         """
         Creates a Job definition
         """
         self._create_container_registry_secret()
 
         jobdef_name = self._format_jobdef_name(docker_image_name, runtime_memory)
+        logger.debug(f"Creating job definition {jobdef_name}")
+
         jobdef_res = yaml.safe_load(config.JOBDEF_DEFAULT)
 
         jobdef_res['metadata']['name'] = jobdef_name
         jobdef_res['metadata']['labels']['version'] = 'lithops_v' + __version__
-        jobdef_res['spec']['maxExecutionTime'] = self.config['runtime_timeout']
+        jobdef_res['spec']['maxExecutionTime'] = timeout or self.config['runtime_timeout']
 
         container = jobdef_res['spec']['template']['containers'][0]
         container['image'] = docker_image_name
@@ -549,8 +592,14 @@ class CodeEngineBackend:
                 plural="jobdefinitions",
                 name=jobdef_name,
             )
-        except Exception:
-            pass
+        except ApiException as e:
+            if e.status == 404:
+                pass
+            else:
+                raise e
+
+        while self._job_def_exists(jobdef_name):
+            time.sleep(1)
 
         try:
             self.custom_api.create_namespaced_custom_object(
@@ -560,7 +609,7 @@ class CodeEngineBackend:
                 plural="jobdefinitions",
                 body=jobdef_res,
             )
-        except Exception as e:
+        except ApiException as e:
             raise e
 
         logger.debug(f'Job Definition {jobdef_name} created')
@@ -573,6 +622,7 @@ class CodeEngineBackend:
         Runtime keys are used to uniquely identify runtimes within the storage,
         in order to know which runtimes are installed and which not.
         """
+        self._get_or_create_namespace()
         jobdef_name = self._format_jobdef_name(docker_image_name, 256, version)
         runtime_key = os.path.join(self.name, version, self.region, self.namespace, jobdef_name)
 
@@ -598,7 +648,7 @@ class CodeEngineBackend:
 
     @retry_on_except
     def _job_def_exists(self, jobdef_name):
-        logger.debug(f"Checking if job_definition {jobdef_name} already exists")
+        logger.debug(f"Checking if job definition {jobdef_name} already exists")
         try:
             self.custom_api.get_namespaced_custom_object(
                 group=config.DEFAULT_GROUP,
@@ -608,10 +658,12 @@ class CodeEngineBackend:
                 name=jobdef_name
             )
         except ApiException as e:
-            # swallow error
-            if (e.status == 404):
+            if e.status == 404:
                 logger.debug(f"Job definition {jobdef_name} not found (404)")
                 return False
+            else:
+                raise e
+
         logger.debug(f"Job definition {jobdef_name} found")
         return True
 
@@ -664,8 +716,9 @@ class CodeEngineBackend:
 
         done = False
         failed = False
+        failed_message = ""
 
-        while not done or failed:
+        while not done and not failed:
             try:
                 w = watch.Watch()
                 for event in w.stream(self.custom_api.list_namespaced_custom_object,
@@ -676,6 +729,14 @@ class CodeEngineBackend:
                     failed = int(event['object'].get('status')['failed'])
                     done = int(event['object'].get('status')['succeeded'])
                     logger.debug('...')
+                    if failed:
+                        try:
+                            pod_description = self.core_api.read_namespaced_pod(
+                                name=f'{jobrun_name}-1-0', namespace=self.namespace
+                            )
+                            failed_message = pod_description.status.container_statuses[0].state.terminated.message
+                        except Exception:
+                            pass
                     if done or failed:
                         w.stop()
             except Exception:
@@ -698,7 +759,7 @@ class CodeEngineBackend:
         self._delete_config_map(config_map_name)
 
         if failed:
-            raise Exception("Unable to extract Python preinstalled modules from the runtime")
+            raise Exception(f"Unable to extract Python preinstalled modules from the runtime: {failed_message}")
 
         data_key = '/'.join([JOBS_PREFIX, jobdef_name + '.meta'])
         json_str = self.internal_storage.get_data(key=data_key)
@@ -717,7 +778,8 @@ class CodeEngineBackend:
         cmap.data = {}
         cmap.data["lithops.payload"] = utils.dict_to_b64str(payload)
 
-        logger.debug("Creating ConfigMap {}".format(config_map_name))
+        logger.debug(f"Creating ConfigMap {config_map_name}")
+
         self.core_api.create_namespaced_config_map(
             namespace=self.namespace,
             body=cmap,

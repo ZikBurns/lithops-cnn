@@ -27,7 +27,8 @@ DEFAULT_REQUIREMENTS = [
     'cloudpickle',
     'ps-mem',
     'tblib',
-    'urllib3<2'
+    'urllib3<2',
+    'psutil'
 ]
 
 AVAILABLE_PY_RUNTIMES = {
@@ -48,7 +49,7 @@ DEFAULT_CONFIG_KEYS = {
     'worker_processes': 1,
     'invoke_pool_threads': 64,
     'architecture': 'x86_64',
-    'ephemeral_storage': 512,
+    'ephemeral_storage': 1024,
     'env_vars': {},
     'vpc': {'subnets': [], 'security_groups': []},
     'efs': []

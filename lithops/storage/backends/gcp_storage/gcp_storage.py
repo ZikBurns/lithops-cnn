@@ -23,13 +23,13 @@ from requests.exceptions import SSLError as TooManyConnectionsError
 from io import BytesIO
 from google.api_core import exceptions as google_exceptions
 from google.cloud import storage
-from google.cloud.exceptions import NotFound
 from lithops.constants import STORAGE_CLI_MSG
 from lithops.storage.utils import StorageNoSuchKeyError
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 5
+
 
 class GCPStorageBackend:
 
@@ -51,16 +51,26 @@ class GCPStorageBackend:
     def get_client(self):
         return self.client
 
+    def exists_bucket(self, bucket_name):
+        try:
+            self.client.get_bucket(bucket_name, timeout=TIMEOUT)
+            return True
+        except google_exceptions.NotFound:
+            return False
+
     def create_bucket(self, bucket_name):
         """
-        Create a bucket if not exists
+        Create a bucket if it doesn't exist
         """
         try:
             bucket = self.client.bucket(bucket_name)
             bucket.storage_class = "STANDARD"
-            self.client.create_bucket(bucket, location=self.region)
-        except google_exceptions.Conflict:
-            pass
+            if not self.exists_bucket(bucket_name):
+                logger.debug(f"Could not find the bucket {bucket_name} in the GCP storage backend")
+                logger.debug(f"Creating new bucket {bucket_name} in the GCP storage backend")
+                self.client.create_bucket(bucket, location=self.region)
+        except google_exceptions.Forbidden:
+            raise StorageNoSuchKeyError(bucket_name, '')
 
     def put_object(self, bucket_name, key, data):
         done = False
@@ -104,7 +114,7 @@ class GCPStorageBackend:
         else:
             return blob.download_as_string(start=start, end=end)
 
-    def upload_file(self, file_name, bucket, key=None, extra_args={}):
+    def upload_file(self, file_name, bucket, key=None, extra_args={}, config=None):
         """Upload a file
 
         :param file_name: File to upload
@@ -125,7 +135,7 @@ class GCPStorageBackend:
             return False
         return True
 
-    def download_file(self, bucket, key, file_name=None, extra_args={}):
+    def download_file(self, bucket, key, file_name=None, extra_args={}, config=None):
         """Download a file
 
         :param bucket: Bucket to download from

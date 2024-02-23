@@ -108,7 +108,7 @@ class RedisBackend:
         else:
             return data
 
-    def upload_file(self, file_name, bucket, key=None, extra_args={}):
+    def upload_file(self, file_name, bucket, key=None, extra_args={}, config=None):
         """Upload a file
 
         :param file_name: File to upload
@@ -129,7 +129,7 @@ class RedisBackend:
             return False
         return True
 
-    def download_file(self, bucket, key, file_name=None, extra_args={}):
+    def download_file(self, bucket, key, file_name=None, extra_args={}, config=None):
         """Download a file
 
         :param bucket: Bucket to download from
@@ -208,7 +208,7 @@ class RedisBackend:
         """
         return bool(self._client.exists(self._format_key(bucket_name, '')))
 
-    def list_objects(self, bucket_name, prefix=None, match_pattern = None):
+    def list_objects(self, bucket_name, prefix=None, match_pattern=None):
         """
         Return a list of objects for the given bucket and prefix.
         :param bucket_name: name of the bucket.

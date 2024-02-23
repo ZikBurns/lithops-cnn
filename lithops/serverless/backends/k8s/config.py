@@ -18,22 +18,25 @@ import os
 
 DEFAULT_CONFIG_KEYS = {
     'runtime_timeout': 600,  # Default: 10 minutes
-    'runtime_memory': 256,  # Default memory: 256 MB
-    'runtime_cpu': 0.5,  # 0.5 vCPU
-    'max_workers': 200,
+    'runtime_memory': 512,  # Default memory: 512 MB
+    'runtime_cpu': 1,  # 1 vCPU
+    'max_workers': 100,
     'worker_processes': 1,
     'docker_server': 'docker.io'
 }
 
 DEFAULT_GROUP = "batch"
 DEFAULT_VERSION = "v1"
+MASTER_NAME = "lithops-master"
+MASTER_PORT = 8080
 
 FH_ZIP_LOCATION = os.path.join(os.getcwd(), 'lithops_k8s.zip')
 
 
 DOCKERFILE_DEFAULT = """
 RUN apt-get update && apt-get install -y \
-        zip \
+        zip redis-server curl \
+        && apt-get clean \
         && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade --ignore-installed setuptools six pip \
@@ -41,6 +44,7 @@ RUN pip install --upgrade --ignore-installed setuptools six pip \
         flask \
         pika \
         boto3 \
+        ibm-cloud-sdk-core \
         ibm-cos-sdk \
         redis \
         requests \
@@ -49,7 +53,8 @@ RUN pip install --upgrade --ignore-installed setuptools six pip \
         numpy \
         cloudpickle \
         ps-mem \
-        tblib
+        tblib \
+        psutil
 
 ENV PYTHONUNBUFFERED TRUE
 
@@ -65,11 +70,12 @@ JOB_DEFAULT = """
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: lithops-runtime-name
+  name: lithops-worker-name
   namespace: default
   labels:
-    type: lithops-runtime
+    type: lithops-worker
     version: lithops_vX.X.X
+    user: lithops-user
 spec:
   activeDeadlineSeconds: 600
   ttlSecondsAfterFinished: 60
@@ -86,11 +92,11 @@ spec:
           args:
             - "/lithops/lithopsentry.py"
             - "$(ACTION)"
-            - "$(PAYLOAD)"
+            - "$(DATA)"
           env:
             - name: ACTION
               value: ''
-            - name: PAYLOAD
+            - name: DATA
               value: ''
             - name: MASTER_POD_IP
               value: ''
@@ -109,6 +115,26 @@ spec:
         - name: lithops-regcred
 """
 
+POD = """
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lithops-worker
+spec:
+  containers:
+    - name: "lithops-worker"
+      image: "<INPUT>"
+      command: ["python3"]
+      args:
+        - "/lithops/lithopsentry.py"
+        - "--"
+        - "--"
+      resources:
+        requests:
+          cpu: '1'
+          memory: '512Mi'
+"""
+
 
 def load_config(config_data):
     for key in DEFAULT_CONFIG_KEYS:
@@ -120,3 +146,6 @@ def load_config(config_data):
         registry = config_data['k8s']['docker_server']
         if runtime.count('/') == 1 and registry not in runtime:
             config_data['k8s']['runtime'] = f'{registry}/{runtime}'
+
+    if config_data['k8s'].get('rabbitmq_executor', False):
+        config_data['k8s']['amqp_url'] = config_data['rabbitmq']['amqp_url']
